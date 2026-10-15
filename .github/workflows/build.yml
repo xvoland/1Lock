@@ -12,6 +12,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# The built-in token needs this to create a release and attach artifacts to
+# it. It is off by default, and without it the release job fails on the very
+# step everything else was built for.
+permissions:
+  contents: write
+
 # A new push cancels an unfinished run: otherwise every commit piles up several
 # heavy wgpu builds.
 concurrency:
@@ -59,12 +65,19 @@ jobs:
       # The version in Info.plist and the version shown by the "About" window
       # are read from the very same tag. A mismatch would mean one of the two
       # was built from a stale binary.
+      #
+      # On master the app is one commit past the last tag and says so with
+      # -dev, so the bare tag is accepted here and the exact match is left to
+      # the release job, which only ever runs on the tagged commit.
       - name: Version check
         run: |
           bundle=$(plutil -extract CFBundleShortVersionString raw dist/1Lock.app/Contents/Info.plist)
-          tag=$(git describe --tags --abbrev=0 | sed 's/^v//')
+          tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*' | sed 's/^v//')
           echo "bundle: $bundle, tag: $tag"
-          test "$bundle" = "$tag"
+          case "$bundle" in
+            "$tag"|"$tag-dev") ;;
+            *) echo "version does not match the tag"; exit 1 ;;
+          esac
       # A disk image holding the app and a link to /Applications, so it installs
       # by dragging, the way people expect. No extra tooling: hdiutil and
       # diskutil ship with macOS, and create-dmg is overkill for two files.
@@ -141,7 +154,7 @@ jobs:
         shell: pwsh
         run: |
           $info = (Get-Item "$env:APP_NAME.exe").VersionInfo
-          $tag = (git describe --tags --abbrev=0) -replace '^v', ''
+          $tag = (git describe --tags --abbrev=0 --match 'v[0-9]*') -replace '^v', ''
           "exe: '$($info.FileVersion)', description: '$($info.FileDescription)', tag: $tag"
           if (-not $info.FileDescription) { throw "resources were not embedded" }
           if (-not $info.FileVersion.StartsWith($tag)) { throw "versions do not match" }
@@ -152,3 +165,48 @@ jobs:
         with:
           name: 1Lock-windows
           path: 1Lock-windows.tar.gz
+
+  # Runs on a tag push only. The artifacts of a plain master run expire after
+  # 90 days, and a tag alone does not make a release page: without this job
+  # the Releases tab stays empty and the only copy of every binary disappears
+  # three months later.
+  release:
+    name: release
+    needs: [macos, windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: files
+      - name: List what is being published
+        run: find files -type f -exec ls -la {} \;
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          dmg="files/1Lock-macos-dmg/1Lock-macos.dmg"
+          win="files/1Lock-windows/1Lock-windows.tar.gz"
+          test -f "$dmg" || { echo "no dmg in artifacts"; exit 1; }
+          test -f "$win" || { echo "no windows archive in artifacts"; exit 1; }
+
+          # A re-run of a tag must not fail on "release already exists": that
+          # is the normal way to retry a failed publish. Assets are replaced
+          # rather than added twice.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag exists, replacing assets"
+            gh release upload "$tag" "$dmg" "$win" --clobber
+          else
+            gh release create "$tag" \
+              --title "1Lock ${tag#v}" \
+              --generate-notes \
+              --verify-tag \
+              "$dmg#1Lock-macos.dmg" \
+              "$win#1Lock-windows.tar.gz"
+          fi
+          gh release view "$tag" --json tagName,url,assets \
+            --jq '{tag: .tagName, url: .url, assets: [.assets[].name]}'

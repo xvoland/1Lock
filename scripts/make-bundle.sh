@@ -15,8 +15,25 @@ APP_NAME=$(sed -n 's/^const APP_TITLE: &str = "\(.*\)";/\1/p' "$ROOT/crates/ui/s
 # The version comes from the latest tag: on macOS the "About" panel reads it
 # from exactly here, from Info.plist, and it has to match what the app itself
 # shows (see crates/ui/build.rs).
-VERSION=$(git -C "$ROOT" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')
-if [[ -z "$VERSION" ]]; then
+#
+# The logic is the one in build.rs, and that duplication is the point: `git
+# describe --abbrev=0` answers "which is the newest tag reachable from here",
+# which for every commit after a release is that same release. Six weeks of
+# work would have shipped labelled 1.27.0, claiming to be a release that never
+# happened. On the tagged commit the version is bare; one commit later it gains
+# -dev, and an unreleased build says so by itself.
+# --match отбрасывает теги, не похожие на версию: тег `nightly` иначе стал бы
+# версией дословно и попал бы в Info.plist, где ни macOS, ни Explorer ничего
+# в нём не поймут.
+DESCRIBE=$(git -C "$ROOT" describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)
+if [[ -n "$DESCRIBE" ]]; then
+    HEAD_SHA=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)
+    TAG_SHA=$(git -C "$ROOT" rev-list -n 1 "$DESCRIBE" 2>/dev/null || true)
+    VERSION="${DESCRIBE#v}"
+    if [[ -n "$HEAD_SHA" && "$HEAD_SHA" != "$TAG_SHA" ]]; then
+        VERSION="$VERSION-dev"
+    fi
+else
     # Without git, take the package version — just like build.rs does.
     VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)
 fi

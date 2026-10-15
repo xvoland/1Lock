@@ -5,36 +5,62 @@
 //! still showed 1.0.0. Now the tag is the single source of truth, and it
 //! cannot be forgotten: without a tag, `cargo build` simply refuses to run.
 //!
+//! A tag on its own is not enough, though. `git describe --tags --abbrev=0`
+//! answers "the newest tag reachable from here", which for every commit after
+//! a release is that same release. Six weeks of work would have gone out
+//! labelled 1.27.0, claiming to be a release that never happened. So the tag
+//! is compared with HEAD: on the tagged commit the version is the bare number,
+//! and one commit later it becomes `1.27.0-dev`. A build that was never
+//! released says so on its own.
+//!
 //! Without git (for example, from an unpacked archive) the package version
 //! from Cargo.toml is used: it can be stale too, but at least it means
 //! something.
 
 use std::process::Command;
 
-/// The most recent tag without the `v` prefix, for example `1.5.0`.
+/// The most recent tag without the `v` prefix, for example `1.5.0`, with
+/// `-dev` appended when HEAD is not the tagged commit.
 fn version_from_git() -> Option<String> {
     // The repository sits one level above the package.
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|p| p.parent())?;
 
-    let out = Command::new("git")
-        .args(["describe", "--tags", "--abbrev=0"])
-        .current_dir(repo)
-        .output()
-        .ok()?;
-
-    if !out.status.success() {
+    // Only tags that look like a version count. A tag called `nightly` would
+    // otherwise become the version verbatim and land in Info.plist and in the
+    // Windows version resource, where neither macOS nor Explorer can make
+    // sense of it.
+    let describe = git(
+        repo,
+        &["describe", "--tags", "--abbrev=0", "--match", "v[0-9]*"],
+    )?;
+    let describe = describe.trim();
+    if describe.is_empty() {
         return None;
     }
 
-    let tag = String::from_utf8(out.stdout).ok()?.trim().to_string();
-    let tag = tag.strip_prefix('v').unwrap_or(&tag);
-    if tag.is_empty() {
-        None
-    } else {
+    // Both sides are asked for explicitly rather than trusting describe to
+    // mean "this commit": a build in CI runs on a detached HEAD at the tag,
+    // and the two answers have to be comparable.
+    let head = git(repo, &["rev-parse", "HEAD"])?;
+    let tagged = git(repo, &["rev-list", "-n", "1", describe])?;
+
+    let tag = describe.strip_prefix('v').unwrap_or(describe);
+    if head.trim() == tagged.trim() {
         Some(tag.to_string())
+    } else {
+        Some(format!("{tag}-dev"))
     }
+}
+
+/// Runs git in `dir` and returns its trimmed stdout.
+fn git(dir: &std::path::Path, args: &[&str]) -> Option<String> {
+    let out = Command::new("git").args(args).current_dir(dir).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8(out.stdout).ok()
 }
 
 fn main() {

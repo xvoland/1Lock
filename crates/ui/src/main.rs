@@ -4491,19 +4491,25 @@ mod trash_confirm_tests {
     /// through: both values were genuine, just different.
     #[test]
     fn version_looks_like_a_version() {
-        let parts: Vec<&str> = APP_VERSION.split('.').collect();
-        assert_eq!(
-            parts.len(),
-            3,
-            "expected X.Y.Z, got {APP_VERSION:?}"
+        // A commit past the last tag carries a -dev marker, and that is the
+        // only thing allowed after the numbers. Anything looser here would
+        // reopen exactly the bug the test was written for: a version that
+        // parses as nothing and ships anyway.
+        let core = APP_VERSION.strip_suffix("-dev").unwrap_or(APP_VERSION);
+        assert!(
+            APP_VERSION == core || APP_VERSION == format!("{core}-dev"),
+            "the version may only end in -dev: {APP_VERSION:?}"
         );
+
+        let parts: Vec<&str> = core.split('.').collect();
+        assert_eq!(parts.len(), 3, "expected X.Y.Z, got {APP_VERSION:?}");
         for part in parts {
             assert!(
                 !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()),
                 "version part must be numeric: {part:?} in {APP_VERSION:?}"
             );
         }
-        assert!(APP_VERSION.starts_with('1'), "version 1.x");
+        assert!(core.starts_with('1'), "version 1.x");
     }
 
     /// An app with one live entry and no attachments.
