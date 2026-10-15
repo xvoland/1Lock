@@ -67,9 +67,49 @@ jobs:
           test "$bundle" = "$tag"
       - name: Archive
         run: tar -czf 1Lock-macos.tar.gz -C dist 1Lock.app
+      # A disk image holding the app and a link to /Applications, so it installs
+      # by dragging, the way people expect. No extra tooling: hdiutil and
+      # diskutil ship with macOS, and create-dmg is overkill for two files.
+      - name: Disk image
+        run: |
+          stage="$RUNNER_TEMP/dmg"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          # ditto, not cp -R: this is the supported way to copy a bundle. The
+          # bundle carries Contents/_CodeSignature and extended attributes, and
+          # a plain copy can drop them — after which the signature no longer
+          # verifies.
+          ditto dist/1Lock.app "$stage/1Lock.app"
+          # A symlink, not a real folder: a folder opens just as well, but
+          # Finder only shows the "drag here to install" hint for a link.
+          ln -s /Applications "$stage/Applications"
+          # diskutil, not hdiutil create: the latter's -volnum and -format form
+          # is deprecated and prints a warning into the log.
+          diskutil image create from "$stage" -volumeName 1Lock -format UDZO 1Lock-macos.dmg
+      # The image has to be mounted and looked inside: an image that builds but
+      # comes out empty looks exactly like a working one in the log. The
+      # signature is checked too — if packing damaged it, Finder refuses to
+      # launch the app and the user is the one left debugging.
+      - name: Verify disk image
+        run: |
+          mount="$RUNNER_TEMP/mnt"
+          rm -rf "$mount"
+          mkdir -p "$mount"
+          hdiutil attach 1Lock-macos.dmg -nobrowse -readonly -mountpoint "$mount"
+          trap 'hdiutil detach "$mount" || true' EXIT
+          test -d "$mount/1Lock.app"
+          test -x "$mount/1Lock.app/Contents/MacOS/1Lock"
+          test -L "$mount/Applications"
+          echo "Applications -> $(readlink "$mount/Applications")"
+          codesign -v "$mount/1Lock.app"
+          ls -la "$mount"
       - uses: actions/upload-artifact@v4
         with:
-          name: 1Lock-macos
+          name: 1Lock-macos-dmg
+          path: 1Lock-macos.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 1Lock-macos-app
           path: 1Lock-macos.tar.gz
 
   windows:
