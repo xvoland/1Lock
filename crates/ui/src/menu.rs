@@ -1,8 +1,9 @@
-//! Меню приложения macOS.
+//! Меню приложения.
 //!
 //! iced 0.14 меню не умеет вовсе — билдер `Application` такого метода не
-//! имеет. Меню собирается через `muda`: приложение получает обычную
-//! строку меню macOS, где «О приложении» открывает системную панель.
+//! имеет. Меню собирается через `muda`: на macOS приложение получает обычную
+//! строку меню, где «О приложении» открывает системную панель, на Windows —
+//! строку в стиле системы с «О приложении» в Help.
 //!
 //! Панель наполняется из [`crate::APP_*`], а не из Info.plist: так текст
 //! виден в одном месте вместе с окном «О приложении» и попадает в
@@ -117,8 +118,46 @@ fn build_and_install() -> Menu {
         .expect("app menu"),
     ));
 
-    // Меню «Правка» нужно системе: без него ⌘C/⌘V/⌘A работают не везде.
-    let edit = Box::leak(Box::new(
+    let menu = Menu::with_items(&[app, file_menu(), edit_menu(), view_menu(), window_menu()])
+        .expect("menu bar");
+    // Только macOS: метод есть исключительно под этой платформой.
+    menu.init_for_nsapp();
+    menu
+}
+
+/// Windows: у системы нет меню приложения, «О приложении» живёт в Help,
+/// а выход — в File. Сама сборка меню общая с macOS, различаются только
+/// порядок и платформенная установка.
+#[cfg(not(target_os = "macos"))]
+fn build_and_install() -> Menu {
+    Menu::with_items(&[file_menu(), edit_menu(), view_menu(), window_menu(), help_menu()])
+        .expect("menu bar")
+}
+
+/// Меню «Help» с той же панелью «О приложении», что и на macOS.
+#[cfg(not(target_os = "macos"))]
+fn help_menu() -> &'static Submenu {
+    Box::leak(Box::new(
+        Submenu::with_items(
+            "Help",
+            true,
+            &[
+                &PredefinedMenuItem::about(
+                    Some(&format!("About {}", crate::APP_TITLE)),
+                    Some(about_metadata()),
+                ),
+                &PredefinedMenuItem::separator(),
+                &PredefinedMenuItem::quit(Some(&format!("Quit {}", crate::APP_TITLE))),
+            ],
+        )
+        .expect("help menu"),
+    ))
+}
+
+/// Меню «Edit» нужно системе: без него ⌘C/⌘V/⌘A на macOS и Ctrl+C/Ctrl+V/
+/// Ctrl+A на Windows работают не везде.
+fn edit_menu() -> &'static Submenu {
+    Box::leak(Box::new(
         Submenu::with_items(
             "Edit",
             true,
@@ -132,11 +171,14 @@ fn build_and_install() -> Menu {
             ],
         )
         .expect("edit menu"),
-    ));
+    ))
+}
 
-    // Файл: без этого меню на macOS не работают ⌘N, ⌘O и ⌘S, а открытие,
-    // сохранение и создание живут только кнопками в окне.
-    let file = Box::leak(Box::new(
+/// Файл: без этого меню не работают ⌘N/⌘O/⌘S на macOS и Ctrl+N/Ctrl+O/
+/// Ctrl+S на Windows, а открытие, сохранение и создание живут только
+/// кнопками в окне.
+fn file_menu() -> &'static Submenu {
+    Box::leak(Box::new(
         Submenu::with_items(
             "File",
             true,
@@ -171,9 +213,11 @@ fn build_and_install() -> Menu {
             ],
         )
         .expect("file menu"),
-    ));
+    ))
+}
 
-    let view = Box::leak(Box::new(
+fn view_menu() -> &'static Submenu {
+    Box::leak(Box::new(
         Submenu::with_items(
             "View",
             true,
@@ -183,9 +227,11 @@ fn build_and_install() -> Menu {
             ],
         )
         .expect("view menu"),
-    ));
+    ))
+}
 
-    let window = Box::leak(Box::new(
+fn window_menu() -> &'static Submenu {
+    Box::leak(Box::new(
         Submenu::with_items(
             "Window",
             true,
@@ -197,11 +243,7 @@ fn build_and_install() -> Menu {
             ],
         )
         .expect("window menu"),
-    ));
-
-    let menu = Menu::with_items(&[app, file, edit, view, window]).expect("menu bar");
-    menu.init_for_nsapp();
-    menu
+    ))
 }
 
 /// Канал, через который события меню попадают в iced.
@@ -278,7 +320,7 @@ fn about_metadata() -> muda::AboutMetadata {
         .comments(Some(crate::APP_COMMENTS))
         .copyright(Some(crate::APP_COPYRIGHT))
         .website(Some(crate::APP_URL))
-        .website_label(Some(crate::APP_URL))
+        .website_label(Some(crate::APP_URL_LABEL))
         .license(Some(crate::APP_LICENSE))
         .build()
 }
@@ -297,11 +339,12 @@ mod tests {
             Some([crate::APP_AUTHOR.to_string()].as_slice())
         );
         assert_eq!(m.website.as_deref(), Some(crate::APP_URL));
+        assert_eq!(m.website_label.as_deref(), Some(crate::APP_URL_LABEL));
         assert!(m.version.as_deref().is_some_and(|v| !v.is_empty()));
         assert!(m
             .copyright
             .as_deref()
-            .is_some_and(|c| c.contains("Vitalii")));
+            .is_some_and(|c| c.contains("Vitalii") && c.contains("xVoLAnD")));
     }
 
     /// Панель собирается дважды без паники: данные не изменяются.

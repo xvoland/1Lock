@@ -128,8 +128,14 @@ ICONSET="$BUILD_DIR/AppIcon.iconset"
 rm -rf "$ICONSET"
 mkdir -p "$ICONSET"
 
-# Источник иконки: своя картинка рядом с проектом, иначе рисуем запасную.
+# Источник иконки: сперва внешний (исходник в assets рядом с проектом), потом
+# та, что лежит в репозитории, и только потом рисуем запасную. Порядок важен
+# для CI: внешней папки там нет, и без второго шага macOS-артефакт получил бы
+# нарисованную иконку, а .exe — ту, что в assets, и они разошлись бы.
 ICON_SRC="${ICON_SRC:-$ROOT/../assets/icon.png}"
+if [[ ! -f "$ICON_SRC" ]]; then
+    ICON_SRC="$ROOT/assets/app-icon.png"
+fi
 MASTER="$BUILD_DIR/AppIcon-1024.png"
 if [[ -f "$ICON_SRC" ]]; then
     echo "   используем $ICON_SRC"

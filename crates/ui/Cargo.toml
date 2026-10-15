@@ -15,9 +15,16 @@ iced_futures = "0.14"
 rfd = { version = "0.15", default-features = false }
 async-channel = "2"
 muda = "0.19.3"
+# Буфер обмена. Кроссплатформенный, но раньше стоял под macOS, и на Windows
+# копирование молча не работало.
+arboard = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-arboard = "3"
+
+[build-dependencies]
+# Иконка и версия внутри .exe на Windows. Кроссплатформенная, но собирает
+# ресурсы только под windows, поэтому и в зависимостях сборки, а не в рантайме.
+winresource = "0.1"
 
 [[bin]]
 name = "opclient-ui"

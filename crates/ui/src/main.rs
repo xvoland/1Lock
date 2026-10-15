@@ -143,15 +143,24 @@ const APP_VERSION: &str = env!("OPCLIENT_VERSION");
 /// Автор приложения.
 const APP_AUTHOR: &str = "Vitalii Tereshchuk";
 
-/// Сайт автора.
-const APP_URL: &str = "https://dotoca.net";
+/// Страница приложения.
+///
+/// Раньше здесь был сайт автора целиком, но в панели «О приложении» нужна
+/// именно страница 1Lock: ради неё человек и открывает эту ссылку.
+const APP_URL: &str = "https://dotoca.net/1lock";
+
+/// Подпись рядом со ссылкой в панели «О приложении».
+///
+/// macOS показывает «подпись (адрес)», и подписью был сам адрес — он
+/// печатался дважды. Слово короче и понятнее, что это ссылка.
+const APP_URL_LABEL: &str = "Homepage";
 
 /// Описание для панели «О приложении».
 const APP_COMMENTS: &str =
     "Read and edit a 1Password export (1PIF).\nPasswords are stored in the export in plain text.";
 
 /// Строка копирайта.
-const APP_COPYRIGHT: &str = "© 2026 Vitalii Tereshchuk";
+const APP_COPYRIGHT: &str = "© 2026, Vitalii Tereshchuk / xVoLAnD";
 
 /// Лицензия.
 const APP_LICENSE: &str =
@@ -3106,16 +3115,10 @@ mod type_scale {
     pub const CAPTION: f32 = 10.0;
 }
 
-#[cfg(target_os = "macos")]
 fn copy_to_clipboard(text: &str) -> bool {
     arboard::Clipboard::new()
         .and_then(|mut c| c.set_text(text.to_owned()))
         .is_ok()
-}
-
-#[cfg(not(target_os = "macos"))]
-fn copy_to_clipboard(_text: &str) -> bool {
-    false
 }
 
 #[cfg(test)]

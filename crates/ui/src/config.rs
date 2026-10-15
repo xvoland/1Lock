@@ -8,9 +8,21 @@
 use std::path::{Path, PathBuf};
 
 /// Путь к файлу с запомненным путём.
+///
+/// На Windows переменной `HOME` обычно нет, и прежний код возвращал `None`:
+/// запомненный путь отключался молча, без ошибки и без сообщения. Там берём
+/// `%APPDATA%` — это штатное место настроек у Windows.
 fn state_file() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".config/1lock/last-path"))
+    #[cfg(target_os = "windows")]
+    {
+        let dir = std::env::var_os("APPDATA")?;
+        return Some(PathBuf::from(dir).join(crate::APP_TITLE).join("last-path"));
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let home = std::env::var_os("HOME")?;
+        Some(PathBuf::from(home).join(".config/1lock/last-path"))
+    }
 }
 
 /// Последний открытый файл, если он ещё существует.
