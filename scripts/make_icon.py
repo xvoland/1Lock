@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Генерация иконки приложения без внешних зависимостей.
+"""App icon generation without external dependencies.
 
-PIL в системе нет, поэтому PNG пишется вручную: заголовок IHDR, один блок
-IDAT со сжатием zlib, хвост IEND. Картинка — скруглённый квадрат с
-замочной скважиной.
+PIL is not available on the system, so the PNG is written by hand: an IHDR
+header, a single zlib-compressed IDAT block, an IEND tail. The picture is a
+rounded square with a keyhole in it.
 
-Запуск: python3 make_icon.py /путь/к/AppIcon.png [размер]
+Usage: python3 make_icon.py /path/to/AppIcon.png [size]
 """
 
 import struct
 import sys
 import zlib
 
-# Цвета в формате RGBA.
+# Colours in RGBA format.
 BG_TOP = (0x1D, 0x27, 0x3A)
 BG_BOTTOM = (0x0E, 0x13, 0x1B)
 KEY = (0x59, 0xD3, 0xFF)
@@ -20,7 +20,7 @@ KEY_DARK = (0x2E, 0xA8, 0xD8)
 
 
 def rounded_rect_alpha(x, y, size, radius, inset):
-    """Прозрачность пикселя внутри скруглённого квадрата."""
+    """Opacity of a pixel inside the rounded square."""
     left = top = inset
     right = bottom = size - inset
     r = radius
@@ -31,20 +31,20 @@ def rounded_rect_alpha(x, y, size, radius, inset):
     dist = (dx * dx + dy * dy) ** 0.5
     if x < left or x > right or y < top or y > bottom:
         return 0.0
-    # сглаживание края на ширине одного пикселя
+    # edge antialiasing over one pixel of width
     return max(0.0, min(1.0, r - dist + 0.5))
 
 
 def keyhole_alpha(x, y, size):
-    """Замок: круг сверху, трапеция-ножка снизу."""
+    """Keyhole: a circle on top, a trapezoid stem below."""
     cx = size / 2
     cy = size * 0.44
     ring_r = size * 0.135
-    # круглая часть
+    # the circular part
     dx, dy = x - cx, y - cy
     d = (dx * dx + dy * dy) ** 0.5
     inside_circle = max(0.0, min(1.0, ring_r - d + 0.5))
-    # ножка: расширяется книзу
+    # the stem: widens towards the bottom
     half_top = size * 0.075
     half_bottom = size * 0.145
     if cy < y < size * 0.70:
@@ -112,7 +112,7 @@ def main():
     data = render(size)
     with open(out, "wb") as f:
         f.write(data)
-    print(f"{out}: {size}x{size}, {len(data)} байт")
+    print(f"{out}: {size}x{size}, {len(data)} bytes")
 
 
 if __name__ == "__main__":

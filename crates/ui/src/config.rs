@@ -1,17 +1,18 @@
-//! Запоминание последнего открытого файла экспорта.
+//! Remembering the last opened export file.
 //!
-//! Хранится один путь в текстовом файле под `~/.config`. Секретов там нет —
-//! только путь, поэтому никакого шифрования не требуется. Запись лучше не
-//! удаётся, чем падает: ошибку сохранения игнорируем, открытый файл всё
-//! равно работает.
+//! A single path is stored in a text file under `~/.config`. There are no
+//! secrets there — just a path — so no encryption is needed. A write that
+//! fails is better than a panic: the save error is ignored, the opened file
+//! works anyway.
 
 use std::path::{Path, PathBuf};
 
-/// Путь к файлу с запомненным путём.
+/// Path to the file holding the remembered path.
 ///
-/// На Windows переменной `HOME` обычно нет, и прежний код возвращал `None`:
-/// запомненный путь отключался молча, без ошибки и без сообщения. Там берём
-/// `%APPDATA%` — это штатное место настроек у Windows.
+/// On Windows there is usually no `HOME` variable, and the old code returned
+/// `None`: the remembered path was silently disabled, with no error and no
+/// message. There we use `%APPDATA%` — the standard place for settings on
+/// Windows.
 fn state_file() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
@@ -25,7 +26,7 @@ fn state_file() -> Option<PathBuf> {
     }
 }
 
-/// Последний открытый файл, если он ещё существует.
+/// The last opened file, if it still exists.
 pub fn last_path() -> Option<PathBuf> {
     let raw = std::fs::read_to_string(state_file()?).ok()?;
     let raw = raw.trim();
@@ -36,7 +37,7 @@ pub fn last_path() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
-/// Запоминает путь к файлу экспорта.
+/// Remembers the path to an export file.
 pub fn remember(path: &Path) {
     let Some(file) = state_file() else {
         return;
@@ -47,20 +48,20 @@ pub fn remember(path: &Path) {
     let _ = std::fs::write(&file, path.to_string_lossy().as_bytes());
 }
 
-/// Забывает последний файл.
+/// Forgets the last file.
 ///
-/// Вызывается при извлечении хранилища: если бы путь остался, следующий
-/// запуск снова открыл бы то, с чем пользователь разошёлся.
+/// Called when the vault is locked: if the path stayed, the next launch would
+/// open again whatever the user had locked away from.
 pub fn forget() {
     if let Some(file) = state_file() {
         let _ = std::fs::remove_file(file);
     }
 }
 
-/// Приводит выбранный путь к самому файлу экспорта.
+/// Reduces the chosen path to the export file itself.
 ///
-/// 1Password отдаёт каталог `Имя….1pif`, внутри которого лежит `data.1pif`.
-/// Если выбрали каталог, ищем файл внутри него.
+/// 1Password hands over a `Name….1pif` directory containing `data.1pif`. If a
+/// directory was chosen, look for the file inside it.
 pub fn resolve_export(chosen: &Path) -> PathBuf {
     if chosen.is_dir() {
         let inner = chosen.join("data.1pif");
@@ -76,7 +77,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn каталог_превращается_в_data_1pif() {
+    fn directory_becomes_data_1pif() {
         let dir = std::env::temp_dir().join("opclient-resolve-test");
         let _ = std::fs::create_dir_all(&dir);
         let file = dir.join("data.1pif");
@@ -88,7 +89,7 @@ mod tests {
     }
 
     #[test]
-    fn пустой_каталог_остаётся_каталогом() {
+    fn empty_directory_stays_a_directory() {
         let dir = std::env::temp_dir().join("opclient-resolve-empty");
         let _ = std::fs::create_dir_all(&dir);
         assert_eq!(resolve_export(&dir), dir);

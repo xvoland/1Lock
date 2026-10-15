@@ -1,18 +1,19 @@
-//! Версия приложения берётся из последнего тега git.
+//! The app version is taken from the most recent git tag.
 //!
-//! Раньше версия была константой в `main.rs`, и её забывали поднимать: теги
-//! дошли до v1.5.0, а панель «О приложении» и Info.plist показывали 1.0.0.
-//! Теперь единственный источник правды — тег, а забыть его нельзя: на
-//! `cargo build` без тега сборка просто не запустится.
+//! The version used to be a constant in `main.rs`, and people kept forgetting
+//! to bump it: tags had reached v1.5.0 while the "About" panel and Info.plist
+//! still showed 1.0.0. Now the tag is the single source of truth, and it
+//! cannot be forgotten: without a tag, `cargo build` simply refuses to run.
 //!
-//! Без git (например, из распакованного архива) берётся версия пакета из
-//! Cargo.toml: она тоже может устареть, но хотя бы что-то осмысленное.
+//! Without git (for example, from an unpacked archive) the package version
+//! from Cargo.toml is used: it can be stale too, but at least it means
+//! something.
 
 use std::process::Command;
 
-/// Последний тег без префикса `v`, например `1.5.0`.
+/// The most recent tag without the `v` prefix, for example `1.5.0`.
 fn version_from_git() -> Option<String> {
-    // Репозиторий лежит уровнем выше пакета.
+    // The repository sits one level above the package.
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|p| p.parent())?;
@@ -50,15 +51,16 @@ fn main() {
     resources(&version);
 }
 
-/// Вшивает иконку и версию в `.exe` под Windows.
+/// Embeds the icon and the version into the `.exe` on Windows.
 ///
-/// На macOS тем же занимается `scripts/make-bundle.sh`: там ресурсы лежат в
-/// Info.plist, здесь — в самом бинарнике. Версия берётся из того же тега,
-/// иначе в свойствах файла было бы 1.0.0 из Cargo.toml, а в macOS-бандле
-/// 1.27.0, и панель «О приложении» показывала бы разное на двух системах.
+/// On macOS `scripts/make-bundle.sh` does the same job: there the resources
+/// live in Info.plist, here they live in the binary itself. The version comes
+/// from the same tag, otherwise the file properties would say 1.0.0 from
+/// Cargo.toml while the macOS bundle says 1.27.0, and the "About" panel would
+/// show different things on the two systems.
 fn resources(version: &str) {
-    // Скрипт сборки компилируется для хоста, а не для цели, поэтому
-    // проверять надо переменную cargo, а не собственный `cfg`.
+    // The build script is compiled for the host, not for the target, so the
+    // cargo variable has to be checked rather than our own `cfg`.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
@@ -66,18 +68,24 @@ fn resources(version: &str) {
     let manifest_dir = std::path::PathBuf::from(
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"),
     );
-    // Путь абсолютный: `rc.exe` ищет файл относительно каталога пакета, а
-    // иконка лежит в assets/ всего репозитория. От каталога пакета
-    // `crates/ui` до него два уровня, а не один: `../assets` указывал бы на
-    // `crates/assets`, которого нет, и сборка падала бы ровно на Windows —
-    // там build.rs единственный, кто ищет иконку.
+    // The path is absolute: `rc.exe` looks for the file relative to the
+    // package directory, while the icon lives in the repository-wide
+    // assets/. From the `crates/ui` package directory that is two levels up,
+    // not one: `../assets` would point at `crates/assets`, which does not
+    // exist, and the build would fail exactly on Windows — there build.rs is
+    // the only thing looking for the icon.
+    //
+    // It must be the .ico, not the .png: `rc.exe` rejects a PNG with RC2175
+    // "is not in 3.00 format" — it wants a real ICO container. The .ico is
+    // built from the very same PNG by scripts/make_ico.py, so the two can
+    // never drift apart visually.
     let icon = manifest_dir
-        .join("../../assets/app-icon.png")
+        .join("../../assets/app-icon.ico")
         .canonicalize()
-        .expect("assets/app-icon.png не найден");
+        .expect("assets/app-icon.ico not found");
 
     let mut res = winresource::WindowsResource::new();
-    res.set_icon(icon.to_str().expect("путь не в utf-8"));
+    res.set_icon(icon.to_str().expect("path is not utf-8"));
     res.set("FileDescription", &crate_title());
     res.set("ProductName", &crate_title());
     res.set("CompanyName", &crate_author());
@@ -85,8 +93,9 @@ fn resources(version: &str) {
     res.set("InternalName", &crate_title());
     res.set("OriginalFilename", "1Lock.exe");
 
-    // Строковые свойства Windows показывает в свойствах файла, числовые нужны
-    // для сравнения версий программно. 1.27.0 -> 1<<16 | 27.
+    // Windows shows the string properties in the file properties, while the
+    // numeric ones are needed to compare versions programmatically.
+    // 1.27.0 -> 1<<16 | 27.
     if let Some((major, minor)) = numeric_version(version) {
         res.set_version_info(winresource::VersionInfo::FILEVERSION, (major << 16) | minor);
         res.set_version_info(winresource::VersionInfo::PRODUCTVERSION, (major << 16) | minor);
@@ -94,11 +103,12 @@ fn resources(version: &str) {
     res.set("FileVersion", version);
     res.set("ProductVersion", version);
 
-    res.compile().expect("не собрались ресурсы Windows");
+    res.compile().expect("failed to compile Windows resources");
 }
 
-/// Название и автор читаются из исходников: иначе версия и название в
-/// ресурсах.exe и в Info.plist разъедутся, как уже разъезжали.
+/// The name and author are read from the sources: otherwise the version and
+/// the name in the .exe resources and in Info.plist drift apart, as they
+/// already have.
 fn crate_title() -> String {
     field("APP_TITLE").unwrap_or_else(|| "1Lock".to_string())
 }
@@ -111,7 +121,7 @@ fn crate_copyright() -> String {
     field("APP_COPYRIGHT").unwrap_or_default()
 }
 
-/// Значение константы вида `const APP_TITLE: &str = "1Lock";`.
+/// The value of a constant shaped like `const APP_TITLE: &str = "1Lock";`.
 fn field(name: &str) -> Option<String> {
     let src = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
@@ -124,8 +134,8 @@ fn field(name: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-/// `1.27.0` -> `(1, 27)`. Неразобранная версия просто не даст числовых
-/// свойств: строковые останутся, и это лучше, чем падение сборки.
+/// `1.27.0` -> `(1, 27)`. An unparsable version simply yields no numeric
+/// properties: the string ones stay, and that is better than failing the build.
 fn numeric_version(version: &str) -> Option<(u64, u64)> {
     let mut parts = version.trim_start_matches('v').split('.');
     let major = parts.next()?.trim().parse().ok()?;

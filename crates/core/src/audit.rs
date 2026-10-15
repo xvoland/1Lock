@@ -1,21 +1,21 @@
-//! Аудит безопасности: какие пароли слабые, какие повторяются, какие устарели.
+//! Security audit: which passwords are weak, which are reused, which are stale.
 //!
-//! Подсчёт живёт здесь, а не в интерфейсе: он опирается на разбор записи и
-//! должен проверяться тестами без окна. Текущее время передаётся аргументом —
-//! иначе «старше трёх лет» зависело бы от машины, на которой падают тесты.
+//! The counting lives here rather than in the UI: it depends on record parsing
+//! and must be testable without a window. The current time is passed in as an
+//! argument — otherwise "older than three years" would depend on the machine.
 
 use std::collections::HashMap;
 
 use crate::pif::Pif;
 
-/// Пароль считается устаревшим, если запись не менялась дольше этого срока.
+/// A password counts as stale once its record has not changed for this long.
 pub const STALE_AFTER_YEARS: i64 = 3;
 
-/// Оценка стойкости пароля: от 0 (пусто) до 4 (очень надёжно).
+/// Password strength score: from 0 (empty) to 4 (very strong).
 ///
-/// Оценка намеренно простая и объяснимая: длина плюс число классов символов.
-/// Настоящая энтропия требует словарей, а их здесь нет — важно не выдавать
-/// грубую эвристику за истину.
+/// The scoring is deliberately crude and explainable: length plus the number of character classes.
+/// Real entropy needs dictionaries, and there are none here — the point is not to pass a
+/// rough heuristic off as the truth.
 pub fn strength(password: &str) -> u8 {
     if password.is_empty() {
         return 0;
@@ -45,32 +45,32 @@ pub fn strength(password: &str) -> u8 {
     }
 }
 
-/// Слабый ли пароль.
+/// Whether a password is weak.
 pub fn is_weak(password: &str) -> bool {
     strength(password) <= 1
 }
 
-/// Запись, названная по имени.
+/// A record referred to by name.
 #[derive(Debug)]
 pub struct Ref {
-    /// Идентификатор записи: по нему выбирается в списке.
+    /// Record identifier: what gets selected in the list.
     pub uuid: String,
-    /// Название записи.
+    /// Record title.
     pub title: String,
 }
 
-/// Группа записей, делящих один пароль.
+/// A group of records sharing one password.
 pub struct ReuseGroup {
-    /// Сам пароль. В отчёт попадает только если группа непустая и содержит
-    /// больше одной записи, но текст всё равно секретный: наружу его не
-    /// отдаём, наружу отдаём [`ReuseGroup::titles`].
+    /// The password itself. It only reaches the report if the group is
+    /// non-empty and holds more than one record, but the text is a secret
+    /// all the same: we hand out [`ReuseGroup::titles`] instead.
     pub password: String,
-    /// Записи с этим паролем.
+    /// Records using this password.
     pub entries: Vec<Ref>,
 }
 
-/// Пароль из группы повторов в отладочный вывод не попадает: структура
-/// секретная, а `{:?}` на ней вызывается чаще, чем кажется.
+/// The password of a reuse group never reaches debug output: the struct is
+/// secret, and `{:?}` gets called on it more often than you would think.
 impl std::fmt::Debug for ReuseGroup {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReuseGroup")
@@ -80,42 +80,42 @@ impl std::fmt::Debug for ReuseGroup {
     }
 }
 
-/// Запись с проблемным паролем.
+/// A record with a problematic password.
 #[derive(Debug)]
 pub struct Flagged {
-    /// Идентификатор записи: по нему выбирается в списке.
+    /// Record identifier: what gets selected in the list.
     pub uuid: String,
-    /// Название записи.
+    /// Record title.
     pub title: String,
-    /// Насколько слабый пароль, 0..=4.
+    /// How weak the password is, 0..=4.
     pub strength: u8,
 }
 
-/// Итог аудита по живым записям.
+/// Audit result over live records.
 #[derive(Debug)]
 pub struct AuditReport {
-    /// Сколько записей вообще имеют пароль.
+    /// How many records have a password at all.
     pub with_password: usize,
-    /// Сколько разных паролей среди них.
+    /// How many distinct passwords there are among them.
     pub unique: usize,
-    /// Сколько записей используют пароль повторно.
+    /// How many records reuse a password.
     pub reused: usize,
-    /// Сколько записей со слабым паролем.
+    /// How many records have a weak password.
     pub weak: usize,
-    /// Сколько записей не менялись дольше [`STALE_AFTER_YEARS`].
+    /// How many records have not changed for longer than [`STALE_AFTER_YEARS`].
     pub stale: usize,
-    /// Группы повторяющихся паролей, отсортированные по убыванию размера.
+    /// Groups of reused passwords, sorted by descending size.
     pub reuse_groups: Vec<ReuseGroup>,
-    /// Записи со слабыми паролями, отсортированные от худших к лучшим.
+    /// Records with weak passwords, sorted worst to best.
     pub weak_items: Vec<Flagged>,
-    /// Записи, которые давно не меняли.
+    /// Records that have not been changed in a long time.
     pub stale_items: Vec<Flagged>,
 }
 
-/// Разбирает живые записи и собирает отчёт.
+/// Parses live records and assembles the report.
 ///
-/// Удалённые записи не учитываются: в 1Password аудит тоже смотрит только на
-/// то, чем пользуются. `now` — время в секундах с начала эпохи.
+/// Deleted records are left out: in 1Password the audit likewise only looks at
+/// what is actually in use. `now` is the time in seconds since the epoch.
 pub fn run(pif: &Pif, now: i64) -> AuditReport {
     let mut by_password: HashMap<String, Vec<Ref>> = HashMap::new();
     let mut weak_items = Vec::new();
@@ -148,8 +148,8 @@ pub fn run(pif: &Pif, now: i64) -> AuditReport {
             }
         }
 
-        // Дат нет или они нулевые — запись не считается старой: отсутствие
-        // данных не повод обвинять пользователя.
+        // No dates, or zeroed ones — the record is not counted as stale: a
+        // missing datum is no reason to blame the user.
         if let Some(updated) = item.updated_at.filter(|v| *v > 0) {
             if updated < cutoff {
                 stale_items.push(Flagged {
@@ -169,7 +169,7 @@ pub fn run(pif: &Pif, now: i64) -> AuditReport {
         .filter(|(_, entries)| entries.len() > 1)
         .map(|(password, entries)| ReuseGroup { password, entries })
         .collect();
-    // Сначала самые часто повторяющиеся: их и надо менять в первую очередь.
+    // Most-reused first: those are the ones that need changing soonest.
     reuse_groups.sort_by(|a, b| {
         b.entries.len().cmp(&a.entries.len()).then_with(|| {
             a.entries
@@ -207,7 +207,7 @@ mod tests {
 
     const NOW: i64 = 1_700_000_000;
 
-    /// Год в секундах, как принято для unix-времени 1Password.
+    /// A year in seconds, as 1Password counts unix time.
     const YEAR: i64 = 365 * 24 * 3600;
 
     fn doc(title: &str, password: &str, updated: i64) -> String {
@@ -222,77 +222,77 @@ mod tests {
     }
 
     #[test]
-    fn пустой_пароль_самым_слабым() {
+    fn empty_password_scores_weakest() {
         assert_eq!(strength(""), 0);
         assert!(is_weak(""));
     }
 
     #[test]
-    fn короткий_пароль_слабый() {
+    fn short_password_is_weak() {
         assert_eq!(strength("abc"), 1);
         assert!(is_weak("abc"));
         assert!(is_weak("1234567"));
     }
 
     #[test]
-    fn длинный_разнообразный_пароль_надёжен() {
+    fn long_varied_password_is_strong() {
         assert!(!is_weak("Correct-Horse-9"));
         assert!(!is_weak("Правильный-Конь-Батарейка-9!"));
         assert_eq!(strength("Aa1!Aa1!Aa1!Aa1!"), 4);
     }
 
     #[test]
-    fn длина_важнее_разнообразия() {
-        // Двадцать шесть букв подряд — это всё ещё один класс символов.
+    fn length_beats_variety() {
+        // Twenty-six letters in a row is still only one character class.
         assert_eq!(strength("abcdefghijklmnopqrstuvwxyz"), 2);
         assert!(!is_weak("abcdefghijklmnopqrstuvwxyz"));
     }
 
     #[test]
-    fn считает_повторы_слабые_и_старые() {
+    fn counts_reuse_weak_and_stale() {
         let lines = vec![
             doc("Github", "shared-secret", NOW - YEAR),
             doc("Gitlab", "shared-secret", NOW - 2 * YEAR),
             doc("Reddit", "another-one", NOW - 5 * YEAR),
-            doc("Старая", "Passw0rd!Passw0rd!", NOW - 9 * YEAR),
-            doc("Короткая", "abc", NOW),
+            doc("Old", "Passw0rd!Passw0rd!", NOW - 9 * YEAR),
+            doc("Short", "abc", NOW),
         ];
         let pif = pif_of(&lines);
         let report = run(&pif, NOW);
 
         assert_eq!(report.with_password, 5);
-        assert_eq!(report.unique, 4, "два записей делят один пароль");
-        assert_eq!(report.reused, 2, "повторно использованных записей");
-        assert_eq!(report.weak, 1, "только «Короткая»");
-        // Reddit (5 лет) и «Старая» (9 лет); year и 2 года ещё в пределах.
-        assert_eq!(report.stale, 2, "старше трёх лет");
+        assert_eq!(report.unique, 4, "two records share one password");
+        assert_eq!(report.reused, 2, "records with a reused password");
+        assert_eq!(report.weak, 1, "only \"Short\"");
+        // Reddit (5 years) and "Old" (9 years); 1 and 2 years are still in range.
+        assert_eq!(report.stale, 2, "older than three years");
     }
 
     #[test]
-    fn удалённые_записи_в_аудит_не_попадают() {
-        let mut lines = vec![doc("Живая", "good-secret-1", NOW)];
+    fn trashed_records_are_ignored() {
+        let mut lines = vec![doc("Live", "good-secret-1", NOW)];
         lines.push(format!(
-            r#"{{"uuid":"{}","typeName":"webforms.WebForm","title":"Удалённая","trashed":true,"secureContents":{{"fields":[{{"designation":"password","value":"bad"}}]}}}}"#,
+            r#"{{"uuid":"{}","typeName":"webforms.WebForm","title":"Deleted","trashed":true,"secureContents":{{"fields":[{{"designation":"password","value":"bad"}}]}}}}"#,
             crate::pif::new_uuid()
         ));
         let pif = pif_of(&lines);
 
         let report = run(&pif, NOW);
         assert_eq!(report.with_password, 1);
-        assert_eq!(report.weak, 0, "удалённая запись не считается слабой");
+        assert_eq!(report.weak, 0, "a deleted record is not counted as weak");
     }
 
     #[test]
-    fn записи_без_даты_не_считаются_старыми() {
-        let line = r#"{"uuid":"U","typeName":"webforms.WebForm","title":"Без даты","secureContents":{"fields":[{"designation":"password","value":"good-secret-1"}]}}"#.to_string();
+    fn records_without_a_date_are_not_stale() {
+        let line = r#"{"uuid":"U","typeName":"webforms.WebForm","title":"No date","secureContents":{"fields":[{"designation":"password","value":"good-secret-1"}]}}"#.to_string();
         let pif = pif_of(&[line]);
 
         let report = run(&pif, NOW);
-        assert_eq!(report.stale, 0, "нет данных — не повод обвинять");
+        assert_eq!(report.stale, 0, "no data is no reason to blame anyone");
     }
 
     #[test]
-    fn группы_повторов_идут_от_самых_частых() {
+    fn reuse_groups_come_most_frequent_first() {
         let mut lines = vec![doc("A1", "twice", NOW), doc("A2", "twice", NOW)];
         lines.push(doc("B1", "thrice", NOW));
         lines.push(doc("B2", "thrice", NOW));
@@ -304,15 +304,15 @@ mod tests {
         assert_eq!(
             report.reuse_groups[0].entries.len(),
             3,
-            "первой идёт самая частая"
+            "the most frequent one comes first"
         );
         assert_eq!(report.reuse_groups[1].entries.len(), 2);
-        // Записи в группе кликабельны: у них есть и uuid, и название.
+        // Records in a group have to be clickable: they carry both a uuid and a title.
         assert!(!report.reuse_groups[0].entries[0].uuid.is_empty());
     }
 
     #[test]
-    fn пустое_хранилище_даёт_нули() {
+    fn empty_vault_gives_zeros() {
         let pif =
             Pif::create(std::env::temp_dir().join(format!("audit-empty-{}", std::process::id())))
                 .unwrap();

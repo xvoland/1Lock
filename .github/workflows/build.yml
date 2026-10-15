@@ -1,6 +1,6 @@
 name: build
 
-# Сборка идёт после пуша: без коммита в remote запускаться нечему.
+# The build runs on push: without a commit in the remote there is nothing to run.
 on:
   push:
     branches: [master]
@@ -12,15 +12,15 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-# Новый пуш отменяет незаконченный прогон: иначе на каждый коммит копится по
-# несколько тяжёлых сборок wgpu.
+# A new push cancels an unfinished run: otherwise every commit piles up several
+# heavy wgpu builds.
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   test:
-    name: тесты (${{ matrix.os }})
+    name: tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -29,21 +29,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Без тегов `git describe` ничего не вернёт, и версия станет 1.0.0
-          # из Cargo.toml. Обрезанная история ломает и сборку, и проверку
-          # версии в артефактах.
+          # Without tags `git describe` returns nothing and the version falls
+          # back to 1.0.0 from Cargo.toml. A truncated history breaks both the
+          # build and the version check in the artifacts.
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Тесты
+      - name: Tests
         run: cargo test --release
       - name: Clippy
         run: cargo clippy --release --all-targets -- -D warnings
 
   macos:
-    name: бандл .app
+    name: .app bundle
     needs: test
     runs-on: macos-latest
     steps:
@@ -52,20 +52,20 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Сборка
+      - name: Build
         run: cargo build --release -p opclient-ui
-      - name: Бандл
+      - name: Bundle
         run: ./scripts/make-bundle.sh
-      # Версия в Info.plist и версия, которую показывает окно «О приложении»,
-      # читаются из одного и того же тега. Расхождение означало бы, что одна
-      # из двух строк собрана по старому бинарнику.
-      - name: Проверка версии
+      # The version in Info.plist and the version shown by the "About" window
+      # are read from the very same tag. A mismatch would mean one of the two
+      # was built from a stale binary.
+      - name: Version check
         run: |
           bundle=$(plutil -extract CFBundleShortVersionString raw dist/1Lock.app/Contents/Info.plist)
           tag=$(git describe --tags --abbrev=0 | sed 's/^v//')
-          echo "бандл: $bundle, тег: $tag"
+          echo "bundle: $bundle, tag: $tag"
           test "$bundle" = "$tag"
-      - name: Архив
+      - name: Archive
         run: tar -czf 1Lock-macos.tar.gz -C dist 1Lock.app
       - uses: actions/upload-artifact@v4
         with:
@@ -73,7 +73,7 @@ jobs:
           path: 1Lock-macos.tar.gz
 
   windows:
-    name: сборка .exe
+    name: .exe build
     needs: test
     runs-on: windows-latest
     steps:
@@ -82,31 +82,32 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Имя берётся из APP_TITLE, а не из крейта: exe с именем `opclient-ui`
-      # в диспетчере задач выглядит как чужой сборщик. Плюс это имя уже
-      # записано в ресурсы как OriginalFilename.
-      - name: Имя приложения
+      # The name is taken from APP_TITLE rather than from the crate: an exe
+      # called `opclient-ui` looks like someone else's builder in Task Manager.
+      # This name is also already written into the resources as OriginalFilename.
+      - name: App name
         shell: pwsh
         run: |
           $m = Select-String -Path crates/ui/src/main.rs -Pattern 'const APP_TITLE: &str = "(.*)";'
           "APP_NAME=$($m.Matches.Groups[1].Value)" | Out-File -FilePath $env:GITHUB_ENV -Append
-      - name: Сборка
+      - name: Build
         run: cargo build --release -p opclient-ui
-      - name: Переименовать
+      - name: Rename
         shell: pwsh
         run: Copy-Item target/release/opclient-ui.exe "$env:APP_NAME.exe"
-      # Проверяем не только версию, но и то, что ресурсы вообще вшились:
-      # build.rs молча выходит раньше, если цель не windows, и без этой
-      # проверки CI собрал бы .exe без иконки и с нулевым FileDescription.
-      - name: Проверка ресурсов
+      # We check not only the version but also that the resources actually got
+      # embedded: build.rs exits early and silently when the target is not
+      # Windows, and without this check CI would ship an .exe with no icon and a
+      # zeroed FileDescription.
+      - name: Resource check
         shell: pwsh
         run: |
           $info = (Get-Item "$env:APP_NAME.exe").VersionInfo
           $tag = (git describe --tags --abbrev=0) -replace '^v', ''
-          "exe: '$($info.FileVersion)', описание: '$($info.FileDescription)', тег: $tag"
-          if (-not $info.FileDescription) { throw "ресурсы не вшились" }
-          if (-not $info.FileVersion.StartsWith($tag)) { throw "версии разошлись" }
-      - name: Архив
+          "exe: '$($info.FileVersion)', description: '$($info.FileDescription)', tag: $tag"
+          if (-not $info.FileDescription) { throw "resources were not embedded" }
+          if (-not $info.FileVersion.StartsWith($tag)) { throw "versions do not match" }
+      - name: Archive
         shell: pwsh
         run: tar -czf 1Lock-windows.tar.gz "$env:APP_NAME.exe"
       - uses: actions/upload-artifact@v4

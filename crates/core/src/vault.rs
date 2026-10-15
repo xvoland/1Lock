@@ -1,25 +1,25 @@
-//! Чтение базы `.1p4` — строго read-only.
+//! Reading the `.1p4` database — strictly read-only.
 //!
-//! ## Гарантия неизменности исходных данных
+//! ## Guarantee that the source stays untouched
 //!
-//! База открывается флагми `SQLITE_OPEN_READ_ONLY` без `SQLITE_OPEN_CREATE`.
-//! Дополнительно делается побайтовая копия SHA-256, которую можно сверить
-//! до и после чтения — см�� [`Vault::fingerprint`] и проверку в тестах.
+//! The database is opened with `SQLITE_OPEN_READ_ONLY` and without `SQLITE_OPEN_CREATE`.
+//! On top of that a SHA-256 of the bytes is taken, so it can be compared
+//! before and after a read — see [`Vault::fingerprint`] and the test check.
 //!
-//! ## Подтверждённая структура
+//! ## Confirmed structure
 //!
-//! Получено осмотром `OnePassword.sqlite` из бэкапа `.1p4`:
+//! Obtained by inspecting `OnePassword.sqlite` from a `.1p4` backup:
 //!
-//! | Таблица            | Содержимое                                       |
-//! |--------------------|--------------------------------------------------|
-//! | `profiles`         | 15 колонок, `iterations`, `salt`, `master_key_data`, `overview_key_data` |
-//! | `items`            | 17 колонок, `uuid`, `key_data`(112 B), `overview_data` |
-//! | `item_details`     | `data` — зашифрованное тело элемента              |
-//! | `folders`          | зашифрованные обзорные данные                     |
-//! | `categories`       | UUID и шифрованные обзорные данные                |
+//! | Table            | Contents                                             |
+//! |------------------|------------------------------------------------------|
+//! | `profiles`       | 15 columns, `iterations`, `salt`, `master_key_data`, `overview_key_data` |
+//! | `items`          | 17 columns, `uuid`, `key_data`(112 B), `overview_data` |
+//! | `item_details`   | `data` — the encrypted body of the item              |
+//! | `folders`        | encrypted overview data                              |
+//! | `categories`     | UUID and encrypted overview data                     |
 //!
-//! Все содержательные поля зашифрованы: `items.title` пуст у всех 541 записей,
-//! колонок `username`/`location_key` в таблице нет.
+//! Every substantive field is encrypted: `items.title` is empty for all 541 records,
+//! and the table has no `username`/`location_key` columns.
 
 use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
@@ -28,103 +28,103 @@ use sha2::{Digest, Sha256};
 use crate::envelope::{parse_field, Envelope, Header, KEY_LEN};
 use crate::error::{Error, Result};
 
-/// Хранилище с метаданными профиля.
+/// Profile metadata.
 #[derive(Debug, Clone)]
 pub struct Profile {
-    /// Идентификатор строки.
+    /// Row identifier.
     pub id: i64,
-    /// UUID профиля.
+    /// Profile UUID.
     pub uuid: String,
-    /// Имя профиля.
+    /// Profile name.
     pub profile_name: String,
-    /// Число итераций PBKDF2.
+    /// PBKDF2 iteration count.
     pub iterations: i64,
-    /// Соль из профиля (16 байт).
+    /// Salt from the profile (16 bytes).
     ///
-    /// ВНИМАНИЕ: не подтверждено, что это соль для `master_key_data`.
-    /// По коду соль берётся из `encryptedSymmetricKey`, которого нет в бэкапе.
+    /// WARNING: not confirmed that this is the salt for `master_key_data`.
+    /// In the code the salt is taken from `encryptedSymmetricKey`, which is not in the backup.
     pub salt: Vec<u8>,
-    /// Блок мастер-ключа с заголовком `opdata01`.
+    /// Master key block with the `opdata01` header.
     pub master_key_data: Vec<u8>,
-    /// Блок обзорного ключа.
+    /// Overview key block.
     pub overview_key_data: Vec<u8>,
-    /// Подсказка к паролю (если задана).
+    /// Password hint (if set).
     pub password_hint: Option<String>,
 }
 
-/// Папка.
+/// A folder.
 #[derive(Debug, Clone)]
 pub struct Folder {
-    /// UUID папки.
+    /// Folder UUID.
     pub uuid: String,
-    /// Зашифрованные обзорные данные.
+    /// Encrypted overview data.
     pub overview_data: Vec<u8>,
 }
 
-/// Элемент хранилища.
+/// A vault item.
 #[derive(Debug, Clone)]
 pub struct Item {
-    /// UUID элемента.
+    /// Item UUID.
     pub uuid: String,
-    /// UUID категории.
+    /// Category UUID.
     pub category_uuid: Option<String>,
-    /// UUID папки.
+    /// Folder UUID.
     pub folder_uuid: Option<String>,
-    /// Зашифрованное тело — 112 байт, схема `IV‖CT‖HMAC`.
+    /// Encrypted body — 112 bytes, `IV‖CT‖HMAC` layout.
     pub key_data: Vec<u8>,
-    /// Зашифрованные обзорные данные.
+    /// Encrypted overview data.
     pub overview_data: Vec<u8>,
-    /// Признак удаления.
+    /// Deletion flag.
     pub trashed: i64,
-    /// Unix-время создания.
+    /// Unix creation time.
     pub created_at: i64,
-    /// Unix-время обновления.
+    /// Unix update time.
     pub updated_at: i64,
 }
 
-/// Категория.
+/// A category.
 ///
-/// В отличие от папок, `categories` хранит часть данных открытым текстом
-/// в колонке `json` — это подтверждено `PRAGMA table_info(categories)`.
-/// Само описание полей внутри `json` зашифровано.
+/// Unlike folders, `categories` keeps part of the data in cleartext
+/// in the `json` column — confirmed by `PRAGMA table_info(categories)`.
+/// The field descriptions inside `json` themselves are encrypted.
 #[derive(Debug, Clone)]
 pub struct Category {
-    /// UUID категории.
+    /// Category UUID.
     pub uuid: String,
-    /// Имя в единственном числе, открытый текст.
+    /// Singular name, cleartext.
     pub singular_name: String,
-    /// Имя во множественном числе, открытый текст.
+    /// Plural name, cleartext.
     pub plural_name: String,
-    /// JSON-описание полей (частично открытая, частично зашифрованная).
+    /// JSON field description (partly cleartext, partly encrypted).
     pub json: String,
 }
 
-/// Сводка по базе — то, что можно показать без расшифровки.
+/// Database summary — what can be shown without decrypting anything.
 #[derive(Debug, Serialize)]
 pub struct VaultSummary {
-    /// UUID профиля.
+    /// Profile UUID.
     pub profile_uuid: String,
-    /// Имя профиля.
+    /// Profile name.
     pub profile_name: String,
-    /// Число итераций PBKDF2.
+    /// PBKDF2 iteration count.
     pub iterations: i64,
-    /// Соль профиля в hex.
+    /// Profile salt in hex.
     pub salt_hex: String,
-    /// SHA-256 базы.
+    /// SHA-256 of the database.
     pub db_sha256: String,
-    /// Количество элементов.
+    /// Number of items.
     pub item_count: usize,
-    /// Количество папок.
+    /// Number of folders.
     pub folder_count: usize,
-    /// Количество категорий.
+    /// Number of categories.
     pub category_count: usize,
-    /// Размер `master_key_data`.
+    /// Size of `master_key_data`.
     pub master_key_data_len: usize,
-    /// Все ли `key_data` имеют ожидаемые 112 байт.
+    /// Whether every `key_data` has the expected 112 bytes.
     pub key_data_uniform: bool,
 }
 
-/// Открытая база `.1p4`.
+/// An opened `.1p4` database.
 pub struct Vault {
     conn: Connection,
     path: std::path::PathBuf,
@@ -139,7 +139,7 @@ impl std::fmt::Debug for Vault {
 }
 
 impl Vault {
-    /// Открывает базу **только на чтение**.
+    /// Opens the database **read-only**.
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
         let path = path.as_ref();
         if !path.exists() {
@@ -155,18 +155,18 @@ impl Vault {
         })
     }
 
-    /// Путь к базе.
+    /// Path to the database.
     pub fn path(&self) -> &std::path::Path {
         &self.path
     }
 
-    /// SHA-256 файла базы — для проверки, что чтение её не изменило.
+    /// SHA-256 of the database file — to check that reading it changed nothing.
     pub fn fingerprint(&self) -> Result<String> {
         let bytes = std::fs::read(&self.path)?;
         Ok(hex(&Sha256::digest(&bytes)))
     }
 
-    /// Профиль.
+    /// The profile.
     pub fn profile(&self) -> Result<Profile> {
         let p = self
             .conn
@@ -197,7 +197,7 @@ impl Vault {
         Ok(p)
     }
 
-    /// Все папки.
+    /// All folders.
     pub fn folders(&self) -> Result<Vec<Folder>> {
         let mut st = self
             .conn
@@ -211,7 +211,7 @@ impl Vault {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    /// Все категории.
+    /// All categories.
     pub fn categories(&self) -> Result<Vec<Category>> {
         let mut st = self.conn.prepare(
             "SELECT uuid, singular_name, plural_name, json
@@ -228,7 +228,7 @@ impl Vault {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    /// Все элементы.
+    /// All items.
     pub fn items(&self) -> Result<Vec<Item>> {
         let mut st = self.conn.prepare(
             "SELECT uuid, category_uuid, folder_uuid, key_data, overview_data,
@@ -250,7 +250,7 @@ impl Vault {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    /// Сводка без расшифровки.
+    /// Summary that requires no decryption.
     pub fn summary(&self) -> Result<VaultSummary> {
         let p = self.profile()?;
         let items = self.items()?;
@@ -272,7 +272,7 @@ impl Vault {
         })
     }
 
-    /// Диагностика блока `master_key_data`: заголовок и геометрия блоба.
+    /// Diagnostics for the `master_key_data` block: header and blob geometry.
     pub fn inspect_master_key_data(&self) -> Result<MasterKeyReport> {
         let p = self.profile()?;
         let (header, env) = parse_field(&p.master_key_data)?;
@@ -286,9 +286,9 @@ impl Vault {
         })
     }
 
-    /// Диагностика `key_data` одного элемента.
+    /// Diagnostics for one item's `key_data`.
     ///
-    /// Эти блобы идут **без** заголовка `opdata01` — это чистые
+    /// These blobs come **without** the `opdata01` header — they are bare
     /// `IV ‖ CT ‖ HMAC`.
     pub fn inspect_item_key(&self, uuid: &str) -> Result<KeyDataReport> {
         let kd: Vec<u8> = self
@@ -307,10 +307,10 @@ impl Vault {
         })
     }
 
-    /// Проверка всех `key_data` одним ключом — возвращает число сошедшихся HMAC.
+    /// Checks every `key_data` against a single key — returns how many HMACs matched.
     ///
-    /// Основа для проверки восстановленного KDF: правильный ключ обязан
-    /// дать `total`, иначе где-то ошибка.
+    /// This is the basis for validating a recovered KDF: the right key must
+    /// yield `total`, otherwise something is wrong.
     pub fn count_valid_mac(&self, key: &[u8; KEY_LEN]) -> Result<MacScan> {
         let items = self.items()?;
         let mut valid = 0usize;
@@ -332,37 +332,37 @@ impl Vault {
     }
 }
 
-/// Ожидаемая длина `key_data`: IV(16) + CT(64) + HMAC(32).
+/// Expected `key_data` length: IV(16) + CT(64) + HMAC(32).
 pub const IV_CT_HMAC_LEN: usize = 112;
 
-/// Диагностика `master_key_data`.
+/// Diagnostics for `master_key_data`.
 #[derive(Debug)]
 pub struct MasterKeyReport {
-    /// 8 байт после магии — тип записи, смысл не установлен.
+    /// 8 bytes after the magic — record type, meaning not established.
     pub header_tag: [u8; 8],
-    /// Полный размер поля.
+    /// Total size of the field.
     pub total_len: usize,
-    /// Геометрия вложенного блоба, если он достаточно велик.
+    /// Geometry of the nested blob, if it is large enough.
     pub envelope: Option<crate::envelope::EnvelopeReport>,
 }
 
-/// Диагностика `key_data`.
+/// Diagnostics for `key_data`.
 #[derive(Debug)]
 pub struct KeyDataReport {
-    /// UUID элемента.
+    /// Item UUID.
     pub uuid: String,
-    /// Геометрия блоба.
+    /// Blob geometry.
     pub report: crate::envelope::EnvelopeReport,
 }
 
-/// Результат массовой проверки HMAC.
+/// Result of a bulk HMAC check.
 #[derive(Debug, Clone, Copy)]
 pub struct MacScan {
-    /// Всего элементов.
+    /// Total items.
     pub total: usize,
-    /// Успешно разобрано как `IV‖CT‖HMAC`.
+    /// Successfully parsed as `IV‖CT‖HMAC`.
     pub parsed: usize,
-    /// Сошедшихся HMAC.
+    /// Matched HMACs.
     pub valid: usize,
 }
 
@@ -375,7 +375,7 @@ fn hex(b: &[u8]) -> String {
     s
 }
 
-/// Признак: поле начинается с магии `opdata01`.
+/// Test: the field starts with the `opdata01` magic.
 pub fn is_opdata(bytes: &[u8]) -> bool {
     Header::parse(bytes).map(|h| h.has_magic()).unwrap_or(false)
 }

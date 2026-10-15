@@ -1,23 +1,23 @@
 #!/bin/bash
-# Сборка macOS-бандла из release-бинарника. Имя берётся из APP_TITLE.
+# Build the macOS bundle from the release binary. The name comes from APP_TITLE.
 #
-# Xcode не нужен: достаточно iconutil, sips и codesign, они входят в
-# состав macOS. Бандл — это обычная папка с фиксированной структурой.
+# Xcode is not needed: iconutil, sips and codesign are enough, they ship with
+# macOS. A bundle is just an ordinary folder with a fixed structure.
 #
-# Запуск: scripts/make-bundle.sh [путь-к-исходника-бинарника]
+# Usage: scripts/make-bundle.sh [path-to-the-source-binary]
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# Название и версию берём из исходников, чтобы Info.plist и окно
-# «О приложении» не расходились.
+# The name and the version are taken from the sources so that Info.plist and
+# the "About" window cannot drift apart.
 APP_NAME=$(sed -n 's/^const APP_TITLE: &str = "\(.*\)";/\1/p' "$ROOT/crates/ui/src/main.rs")
-# Версию берём из последнего тега: панель «О приложении» на macOS читает её
-# именно отсюда, из Info.plist, и она обязана совпадать с той, что показывает
-# само приложение (см. crates/ui/build.rs).
+# The version comes from the latest tag: on macOS the "About" panel reads it
+# from exactly here, from Info.plist, and it has to match what the app itself
+# shows (see crates/ui/build.rs).
 VERSION=$(git -C "$ROOT" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')
 if [[ -z "$VERSION" ]]; then
-    # Без git берём версию пакета — как это делает build.rs.
+    # Without git, take the package version — just like build.rs does.
     VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)
 fi
 AUTHOR=$(sed -n 's/^const APP_AUTHOR: &str = "\(.*\)";/\1/p' "$ROOT/crates/ui/src/main.rs")
@@ -27,26 +27,26 @@ COMMENTS=$(sed -n 's/^const APP_COMMENTS: &str = "\(.*\)";/\1/p' "$ROOT/crates/u
 BUILD=1
 
 if [[ -z "$APP_NAME" || -z "$VERSION" ]]; then
-    echo "не удалось прочитать APP_TITLE/APP_VERSION из crates/ui/src/main.rs" >&2
+    echo "failed to read APP_TITLE/APP_VERSION from crates/ui/src/main.rs" >&2
     exit 1
 fi
 BUNDLE_ID="com.xvoland.1lock"
 
 BIN_SRC="${1:-$ROOT/target/release/opclient-ui}"
 if [[ ! -f "$BIN_SRC" ]]; then
-    echo "не найден бинарник: $BIN_SRC" >&2
-    echo "сначала соберите его: cargo build --release -p opclient-ui" >&2
+    echo "binary not found: $BIN_SRC" >&2
+    echo "build it first: cargo build --release -p opclient-ui" >&2
     exit 1
 fi
 
-# Скрипт только пакует, а не собирает. Без этой проверки он молча заворачивал
-# бинарник часовой давности и печатал «готово» — выглядело как успешная сборка
-# свежего кода, а внутри оказывался старый.
+# This script only packages, it does not build. Without this check it would
+# silently wrap an hour-old binary and print "done" — which looked like a
+# successful build of fresh code while a stale one was inside.
 if [[ -n "$(find "$ROOT/crates" "$ROOT/Cargo.toml" -newer "$BIN_SRC" \
             \( -name '*.rs' -o -name '*.toml' \) 2>/dev/null | head -1)" ]]; then
-    echo "бинарник старше исходников: $BIN_SRC" >&2
-    echo "пересоберите: cargo build --release -p opclient-ui" >&2
-    echo "или передайте готовый путь первым аргументом" >&2
+    echo "binary is older than the sources: $BIN_SRC" >&2
+    echo "rebuild: cargo build --release -p opclient-ui" >&2
+    echo "or pass a ready path as the first argument" >&2
     exit 1
 fi
 
@@ -54,11 +54,11 @@ BUILD_DIR="$ROOT/dist"
 APP="$BUILD_DIR/$APP_NAME.app"
 STAGE="$BUILD_DIR/.stage"
 
-echo "==> чистка"
+echo "==> cleanup"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources"
 
-echo "==> бинарник"
+echo "==> binary"
 cp "$BIN_SRC" "$STAGE/Contents/MacOS/$APP_NAME"
 chmod +x "$STAGE/Contents/MacOS/$APP_NAME"
 
@@ -88,8 +88,9 @@ cat > "$STAGE/Contents/Info.plist" <<PLIST
     <string>$BUILD</string>
     <key>CFBundleGetInfoString</key>
     <string>$COMMENTS</string>
-    <!-- Системная панель «О приложении» берёт эти поля из Info.plist,
-         а не из метаданных muda: без них автор и сайт не показываются. -->
+    <!-- The system "About" panel takes these fields from Info.plist rather
+         than from the muda metadata: without them the author and website are
+         not shown. -->
     <key>NSHumanReadableCopyright</key>
     <string>$COPYRIGHT · $URL</string>
     <key>NSApplicationName</key>
@@ -102,12 +103,12 @@ cat > "$STAGE/Contents/Info.plist" <<PLIST
     <string>public.app-category.utilities</string>
     <key>NSHighResolutionCapable</key>
     <true/>
-    <!-- Приложение открывает файлы 1PIF двойным кликом. -->
+    <!-- The application opens 1PIF files on double-click. -->
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>
             <key>CFBundleTypeName</key>
-            <string>Экспорт 1Password</string>
+            <string>1Password Export</string>
             <key>CFBundleTypeRole</key>
             <string>Editor</string>
             <key>LSHandlerRank</key>
@@ -123,30 +124,32 @@ cat > "$STAGE/Contents/Info.plist" <<PLIST
 PLIST
 plutil -lint "$STAGE/Contents/Info.plist" >/dev/null
 
-echo "==> иконка"
+echo "==> icon"
 ICONSET="$BUILD_DIR/AppIcon.iconset"
 rm -rf "$ICONSET"
 mkdir -p "$ICONSET"
 
-# Источник иконки: сперва внешний (исходник в assets рядом с проектом), потом
-# та, что лежит в репозитории, и только потом рисуем запасную. Порядок важен
-# для CI: внешней папки там нет, и без второго шага macOS-артефакт получил бы
-# нарисованную иконку, а .exe — ту, что в assets, и они разошлись бы.
+# Icon sources: first the external one (a source next to the project), then
+# the one in the repository, and only then we draw a fallback. The order
+# matters for CI: the external folder is not there, and without the second
+# step the macOS artifact would get the drawn icon while the .exe would get
+# the one in assets, and the two would diverge.
 ICON_SRC="${ICON_SRC:-$ROOT/../assets/icon.png}"
 if [[ ! -f "$ICON_SRC" ]]; then
     ICON_SRC="$ROOT/assets/app-icon.png"
 fi
 MASTER="$BUILD_DIR/AppIcon-1024.png"
 if [[ -f "$ICON_SRC" ]]; then
-    echo "   используем $ICON_SRC"
-    # Приводим к 1024×1024: sips сохраняет альфа-канал, iconutil его требует.
+    echo "   using $ICON_SRC"
+    # Normalise to 1024×1024: sips preserves the alpha channel, iconutil
+    # requires it.
     sips -z 1024 1024 "$ICON_SRC" --out "$MASTER" >/dev/null
 else
-    echo "   своей иконки нет, рисуем запасную"
+    echo "   no icon of our own, drawing a fallback"
     python3 "$ROOT/scripts/make_icon.py" "$MASTER" 1024
 fi
 
-# iconutil ждёт все размеры; недостающие получаем уменьшением
+# iconutil wants every size; the missing ones come from downscaling
 add_size() { sips -z "$1" "$1" "$MASTER" --out "$ICONSET/$2" >/dev/null; }
 add_size 16   icon_16x16.png
 add_size 32   icon_16x16@2x.png
@@ -162,18 +165,18 @@ cp "$MASTER" "$ICONSET/icon_512x512@2x.png"
 iconutil -c icns "$ICONSET" -o "$STAGE/Contents/Resources/AppIcon.icns"
 rm -rf "$ICONSET" "$BUILD_DIR/AppIcon-1024.png"
 
-echo "==> подпись"
-# Ad-hoc подпись достаточно для локального запуска. Без неё Gatekeeper
-# может ругаться на бинарник, запущенный не из магазина.
+echo "==> signing"
+# An ad-hoc signature is enough for local launch. Without it Gatekeeper may
+# complain about a binary that did not come from the store.
 codesign --force --sign - --timestamp=none "$STAGE" >/dev/null 2>&1 \
-    || echo "   предупреждение: codesign не сработал, запуск может быть ограничен"
+    || echo "   warning: codesign did not work, launching may be restricted"
 
-echo "==> установка"
+echo "==> install"
 rm -rf "$APP"
 mv "$STAGE" "$APP"
 rmdir "$BUILD_DIR" 2>/dev/null || true
 
 echo
-echo "готово: $APP"
-echo "размер: $(du -sh "$APP" | cut -f1)"
-echo "запуск: open \"$APP\""
+echo "done: $APP"
+echo "size: $(du -sh "$APP" | cut -f1)"
+echo "launch: open \"$APP\""

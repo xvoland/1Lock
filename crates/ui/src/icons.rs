@@ -1,81 +1,82 @@
-//! Значки разделов боковой панели.
+//! Sidebar section icons.
 //!
-//! Начертания взяты из набора Lucide (лицензия ISC): контурные, сетка 24×24,
-//! обводка 2 с закруглёнными концами. SF Symbols нативными быть не могут —
-//! лицензия разрешает использовать символы только внутри приложения на
-//! платформе Apple и прямо запрещает их извлекать и распространять, так что
-//! положить файл символов в репозиторий нельзя.
+//! The glyphs come from the Lucide set (ISC licence): outlines, 24×24 grid,
+//! 2-wide stroke with rounded caps. SF Symbols cannot be used natively — the
+//! licence only permits the symbols inside an app on Apple platforms and
+//! explicitly forbids extracting and redistributing them, so the symbol file
+//! cannot be committed to the repository.
 //!
-//! Цвет запекается прямо в SVG, потому что резолвер не понимает
-//! `currentColor`, а значок в боковой панели должен сереть вместе с подписью
-//! и загораться вместе с выделением.
+//! The colour is baked straight into the SVG because the resolver does not
+//! understand `currentColor`, and a sidebar icon has to grey out together with
+//! its label and light up together with the selection.
 //!
-//! Каждый путь пишется одной строкой **намеренно**. Перенос строки через
-//! обратный слэш работает в обычных строках Rust, но не в raw-строках
-//! `r#"…"#`: там `\` и новая строка попадают внутрь атрибута `d="…"`, путь
-//! обрывается, и значок рисуется частично — молча, без ошибки компиляции.
+//! Every path is written on a single line **on purpose**. A backslash line
+//! continuation works in ordinary Rust strings but not in raw strings
+//! `r#"…"#`: there the `\` and the newline land inside the `d="…"` attribute,
+//! the path is cut short, and the icon renders partially — silently, with no
+//! compile error.
 
 use iced::{Color, Length};
 
 use iced::widget::svg::{Handle, Style, Svg};
 
-/// Значки, которые рисуются в интерфейсе.
+/// Icons drawn in the UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Icon {
-    /// Раздел «Все элементы».
+    /// "All Items" section.
     AllItems,
-    /// Раздел «Категории».
+    /// "Categories" section.
     Categories,
-    /// Раздел «Папки».
+    /// "Folders" section.
     Folders,
-    /// Раздел «Инструменты».
+    /// "Tools" section.
     Tools,
-    /// Корзина.
+    /// Trash.
     Trash,
-    /// Аудит безопасности.
+    /// Security audit.
     Audit,
-    /// Логин.
+    /// Login.
     Login,
-    /// Заметка.
+    /// Secure note.
     SecureNote,
-    /// Пароль.
+    /// Password.
     Password,
-    /// Банковская карта.
+    /// Bank card.
     CreditCard,
-    /// Почтовая учётная запись.
+    /// Email account.
     Email,
-    /// Документ личности.
+    /// Identity document.
     Identity,
-    /// Паспорт.
+    /// Passport.
     Passport,
-    /// Сервер.
+    /// Server.
     Server,
-    /// Лицензия на программу.
+    /// Software licence.
     Licence,
-    /// Показать секретное поле.
+    /// Reveal a secret field.
     Eye,
-    /// Скрыть секретное поле.
+    /// Hide a secret field.
     EyeOff,
-    /// Скопировать значение в буфер обмена: два наложенных листочка.
+    /// Copy a value to the clipboard: two overlapping sheets.
     Copy,
-    /// Открыть вложение.
+    /// Open an attachment.
     Open,
-    /// Отсоединить вложение от записи.
+    /// Detach an attachment from the item.
     Detach,
-    /// Отменить действие.
+    /// Cancel an action.
     Cancel,
-    /// Создать: плюс.
+    /// Create: plus.
     Plus,
-    /// Сохранить файл.
+    /// Save the file.
     Save,
-    /// Извлечь и закрыть хранилище.
+    /// Unlock and close the vault.
     Eject,
-    /// Создать новое хранилище: папка со знаком плюс.
+    /// Create a new vault: a folder with a plus.
     NewVault,
 }
 
 impl Icon {
-    /// Внутренняя геометрия значка в системе координат 24×24.
+    /// The icon's inner geometry in the 24×24 coordinate system.
     fn body(self) -> &'static str {
         match self {
             Icon::AllItems => {
@@ -152,11 +153,11 @@ impl Icon {
 }
 
 impl Icon {
-    /// Значок для названия вида записи, как его возвращает `PifItem::kind()`.
+    /// Icon for an item kind name, as returned by `PifItem::kind()`.
     ///
-    /// Родной `typeName` не берётся: он машинный, а в боковой панели
-    /// показывается перевод, и значок должен соответствовать тому, что видит
-    /// человек.
+    /// The raw `typeName` is not used: it is machine-oriented, while the
+    /// sidebar shows a translation, so the icon has to match what the person
+    /// actually sees.
     pub fn for_kind(kind: &str) -> Icon {
         match kind {
             "Logins" => Icon::Login,
@@ -175,8 +176,8 @@ impl Icon {
 
 fn hex(color: Color) -> String {
     let channel = |v: f32| {
-        // После интерполяции компонент может выйти за 0..=1: такой hex был бы
-        // невалидным, и SVG не разобрался бы.
+        // After interpolation a component can fall outside 0..=1: such a hex
+        // would be invalid and the SVG would fail to parse.
         let v = v.clamp(0.0, 1.0);
         format!("{:02x}", (v * 255.0).round() as u8)
     };
@@ -188,33 +189,33 @@ fn hex(color: Color) -> String {
     )
 }
 
-/// Значок заданного размера и цвета.
+/// An icon of the given size and colour.
 ///
-/// Строка собирается на каждый вызов, но это дёшево: идентификатор handle у
-/// iced считается хешем содержимого, поэтому разобранный SVG берётся из кэша
-/// рендерера, а не парсится заново.
+/// The string is rebuilt on every call, but that is cheap: iced treats the
+/// handle id as a hash of the contents, so the parsed SVG comes from the
+/// renderer's cache instead of being parsed again.
 pub fn icon<'a>(name: Icon, size: f32, color: Color) -> Svg<'a> {
     svg(name, size, color, STROKE)
 }
 
-/// Толщина обводки в системе координат значка, 24×24.
+/// Stroke width in the icon's 24×24 coordinate system.
 ///
-/// Две единицы — это исходная толщина набора. Крупные значки в тулбаре
-/// рисуются с [`STROKE_THIN`]: при размере 28 px обводка в две единицы
-/// даёт около 2,3 px на экране, а 0,8 — около 0,9; на Retina разница
-/// втрое и заметна глазом.
+/// Two units is the set's native width. Large toolbar icons are drawn with
+/// [`STROKE_THIN`]: at 28 px a two-unit stroke gives about 2.3 px on screen
+/// and 0.8 gives about 0.9; on Retina the difference triples and is obvious
+/// to the eye.
 pub const STROKE: f32 = 2.0;
 pub const STROKE_THIN: f32 = 0.8;
 
-/// Значок с заданной толщиной обводки.
+/// An icon with an explicit stroke width.
 pub fn icon_thin<'a>(name: Icon, size: f32, color: Color) -> Svg<'a> {
     svg(name, size, color, STROKE_THIN)
 }
 
 fn svg<'a>(name: Icon, size: f32, color: Color, stroke: f32) -> Svg<'a> {
-    // У корня SVG нет width/height — только viewBox. Если задать и их, resvg
-    // считает размер документа по этим атрибутам, а виджет по своим, и
-    // значок начинает обрезаться рамкой.
+    // The SVG root has no width/height — only viewBox. Set those too and resvg
+    // takes the document size from those attributes while the widget uses its
+    // own, and the icon starts being clipped by the frame.
     let svg = format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="{}" stroke-width="{}" stroke-linecap="round" stroke-linejoin="round">{}</svg>"#,
         hex(color),
@@ -228,9 +229,9 @@ fn svg<'a>(name: Icon, size: f32, color: Color, stroke: f32) -> Svg<'a> {
         .style(move |_, _| Style { color: Some(color) })
 }
 
-/// Толщина попадает в атрибут как текст, поэтому лишние нули убираются:
-/// иначе в разметке было бы `stroke-width="2.0000001"`, и кэш iced по
-/// содержимому набирал бы новый handle на каждый вызов.
+/// The width goes into the attribute as text, so trailing zeros are trimmed:
+/// otherwise the markup would carry `stroke-width="2.0000001"` and iced's
+/// content-keyed cache would pick a new handle on every call.
 fn trim_float(v: f32) -> String {
     let s = format!("{v}");
     if s.contains('.') {
@@ -273,54 +274,55 @@ mod tests {
     ];
 
     #[test]
-    fn каждый_значок_даёт_разметку() {
+    fn every_icon_has_markup() {
         for icon in ALL {
             let body = icon.body();
-            assert!(body.starts_with('<'), "у {icon:?} пустое тело");
-            assert!(body.ends_with("/>"), "у {icon:?} путь не закрыт: {body}");
+            assert!(body.starts_with('<'), "{icon:?} has an empty body");
+            assert!(body.ends_with("/>"), "{icon:?} has an unclosed path: {body}");
         }
     }
 
-    /// Обратный слэш внутри пути обрывает его молча.
+    /// A backslash inside a path cuts it short, silently.
     #[test]
-    fn в_геометрии_нет_обратных_слэшей() {
+    fn no_backslashes_in_geometry() {
         for icon in ALL {
             let body = icon.body();
             assert!(
                 !body.contains('\\'),
-                "у {icon:?} в пути остался обратный слэш, путь обрежется: {body}"
+                "{icon:?} still has a backslash in its path, the path will be cut: {body}"
             );
         }
     }
 
-    /// Переносов строки быть не должно: в атрибуте `d` они допустимы, но
-    /// именно из-за них сюда попал сломанный путь.
+    /// There must be no line breaks: they are legal in the `d` attribute, but
+    /// a broken path slipped in here precisely because of them.
     #[test]
-    fn путь_значка_однострочный() {
+    fn icon_path_is_single_line() {
         for icon in ALL {
             let body = icon.body();
             assert!(
                 !body.contains('\n'),
-                "у {icon:?} путь разбит на несколько строк"
+                "{icon:?} has a path split across several lines"
             );
         }
     }
 
-    /// Резолвер не понимает `currentColor`: цвет запекается в разметку.
+    /// The resolver does not understand `currentColor`: the colour is baked
+    /// into the markup.
     #[test]
-    fn current_color_не_остался() {
+    fn no_current_color_left() {
         for icon in ALL {
             assert!(
                 !icon.body().contains("currentColor"),
-                "у {icon:?} остался currentColor, который резолвер не понимает"
+                "{icon:?} still has a currentColor the resolver does not understand"
             );
         }
     }
 
-    /// У каждого вида записи из боковой панели есть свой значок, и разные виды
-    /// не делят один на всех: иначе весь смысл значка теряется.
+    /// Every item kind in the sidebar has its own icon, and different kinds do
+    /// not share one: otherwise the whole point of the icon is lost.
     #[test]
-    fn у_каждого_вида_свой_значок() {
+    fn every_kind_has_its_own_icon() {
         let kinds = [
             ("Logins", Icon::Login),
             ("Secure Notes", Icon::SecureNote),
@@ -337,35 +339,35 @@ mod tests {
             assert_eq!(
                 Icon::for_kind(kind),
                 expected,
-                "вид {kind} получил не тот значок"
+                "kind {kind} got the wrong icon"
             );
         }
 
-        // Значки разных видов не должны совпадать.
+        // Icons of different kinds must not collide.
         let mut seen: Vec<Icon> = kinds.iter().map(|(_, icon)| *icon).collect();
         seen.sort_by_key(|i| format!("{i:?}"));
         seen.dedup();
-        assert_eq!(seen.len(), kinds.len(), "значки видов повторяются");
+        assert_eq!(seen.len(), kinds.len(), "kind icons are duplicated");
     }
 
-    /// Неизвестный вид не должен ломать отрисовку: показываем папку.
+    /// An unknown kind must not break rendering: show a folder.
     #[test]
-    fn неизвестный_вид_даёт_запасной_значок() {
-        assert_eq!(Icon::for_kind("Какая-то новая категория"), Icon::Folders);
+    fn unknown_kind_falls_back_to_an_icon() {
+        assert_eq!(Icon::for_kind("Some brand new category"), Icon::Folders);
     }
 
     #[test]
-    fn цвет_преобразуется_в_шестизначный_hex() {
+    fn color_becomes_six_digit_hex() {
         assert_eq!(hex(Color::from_rgb(1.0, 0.0, 0.0)), "#ff0000");
         assert_eq!(hex(Color::from_rgb(0.0, 0.0, 0.0)), "#000000");
         assert_eq!(hex(Color::from_rgb(1.0, 1.0, 1.0)), "#ffffff");
     }
 
     #[test]
-    fn цвет_обрезается_к_допустимому_диапазону() {
-        // После интерполяции компонент действительно выходит за 0..=1.
-        // `Color::from_rgb` такой ввод отвергает, поэтому структура
-        // собирается напрямую — ровно как это делает интерполяция.
+    fn color_is_clamped_to_the_valid_range() {
+        // After interpolation a component really does fall outside 0..=1.
+        // `Color::from_rgb` rejects such input, so the struct is built
+        // directly — exactly what interpolation does.
         let raw = Color {
             r: 1.4,
             g: -0.2,

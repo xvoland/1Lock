@@ -1,27 +1,27 @@
-//! Клиент экспорта 1Password — интерфейс на iced.
+//! 1Password export browser — an iced interface.
 //!
-//! Источник данных — файл экспорта 1PIF, то есть снимок vault на момент
-//! экспорта. Приложение работает **только на чтение** и ничего не пишет
-//! в исходные данные.
+//! The data source is a 1PIF export file, i.e. a snapshot of a vault taken at
+//! export time. The application is **read-only** and never writes back into
+//! the source data.
 //!
-//! # Что показывает
+//! # What it shows
 //!
-//! - список записей с поиском по названию, домену и URL;
-//! - фильтр по типу записи;
-//! - детали: заголовок, тип, логины, пароль, URL, заметки;
-//! - копирование логина, пароля и URL в буфер обмена;
-//! - TOTP-код с обратным отсчётом, если в записи есть `otpauth://`.
+//! - the item list, searchable by title, domain and URL;
+//! - a filter by item kind;
+//! - details: title, kind, logins, password, URL, notes;
+//! - copying the login, password and URL to the clipboard;
+//! - a TOTP code with a countdown, when the item carries an `otpauth://`.
 //!
-//! # Открытие файла
+//! # Opening the file
 //!
-//! Путь можно задать аргументом командной строки. Если аргумента нет,
-//! берётся путь из прошлого запуска. Файл выбирается кнопкой «Открыть…»
-//! и запоминается, поэтому в следующий раз приложение откроет его само.
+//! The path can be given as a command-line argument. With no argument the
+//! path from the previous run is used. The file is chosen with the "Open…"
+//! button and remembered, so next time the application opens it on its own.
 //!
-//! # Приватность
+//! # Privacy
 //!
-//! Пароль по умолчанию замаскирован. Раскрыть его можно явно, отдельной
-//! кнопкой. Приложение ничего не логирует и не пишет на диск.
+//! The password is masked by default. Revealing it takes an explicit, separate
+//! button. The application logs nothing and writes nothing to disk.
 
 mod config;
 mod icons;
@@ -41,11 +41,11 @@ use opclient_core::pif::{EntryDraft, Pif, PifItem, TrashStats, FOLDER_TYPE};
 use opclient_core::totp::{now_unix, Totp};
 
 fn main() -> iced::Result {
-    // Аргумент важнее запомненного пути: так можно открыть другой файл,
-    // не залезая в настройки.
+    // A command-line argument outranks the remembered path: that way you can
+    // open a different file without digging through settings.
     let from_arg = std::env::args().nth(1).map(PathBuf::from);
 
-    // Канал событий меню: до старта iced, иначе подписка его не увидит.
+    // Menu event channel: it must exist before iced starts or the subscription misses it.
     menu::init();
 
     let app = iced::application(move || App::new(from_arg.clone()), App::update, App::view)
@@ -54,177 +54,177 @@ fn main() -> iced::Result {
         .subscription(App::subscription)
         .window_size((1150.0, 740.0));
 
-    // SF Pro просим явно. По умолчанию iced берёт «безымянный sans-serif»,
-    // а в системе это семейство не выставлено под своим именем: `atsutil`
-    // показывает только Display-варианты и внутренние PostScript-имена.
-    // Поэтому надёжнее прочитать сам системный шрифт.
+    // SF Pro is requested explicitly. By default iced takes the "nameless
+    // sans-serif", and the system does not expose that family under a name
+    // of its own: `atsutil` shows only the Display variants and the internal
+    // PostScript names. So it is more reliable to read the system font file.
     match system_font() {
         Some(bytes) => app.font(bytes).run(),
         None => app.run(),
     }
 }
 
-/// Системный шрифт macOS (SF Pro) для интерфейса.
+/// The macOS system font (SF Pro) for the interface.
 ///
-/// Если файла нет — приложение всё равно запускается, просто остаётся со
-/// шрифтом по умолчанию: это не повод отказываться в запуске.
+/// If the file is missing the application still starts, it just keeps the
+/// default font: that is no reason to refuse to run.
 fn system_font() -> Option<Vec<u8>> {
     std::fs::read("/System/Library/Fonts/SFNS.ttf").ok()
 }
 
 struct App {
-    /// `None` — файл ещё не выбран.
+    /// `None` — no file picked yet.
     vault: Option<Pif>,
-    /// Путь к открытому файлу.
+    /// Path of the open file.
     path: Option<PathBuf>,
-    /// Что пошло не так при открытии.
+    /// What went wrong while opening.
     error: Option<String>,
-    /// Индексы в `vault.items`, проходящие фильтр и поиск.
+    /// Indices into `vault.items` that pass the filter and the search.
     entries: Vec<usize>,
     query_input: String,
     query: String,
     kind_filter: String,
     selected: Option<usize>,
-    /// uuid -> раскрыт ли пароль.
+    /// uuid -> whether the password is revealed.
     revealed: HashMap<String, bool>,
-    /// Ширина панели списка в логических точках.
+    /// Width of the list panel in logical points.
     list_width: f32,
-    /// Идёт ли сейчас перетаскивание границы панели списка.
+    /// Whether the list panel border is being dragged right now.
     resizing: bool,
-    /// Наведён ли указатель на границу: без этого признака нажатие мыши
-    /// в любом месте окна начинало бы перетаскивание.
+    /// Whether the pointer is over the border: without this flag a mouse press
+    /// anywhere in the window would start a drag.
     hover_resize: bool,
-    /// Ширина окна в логических точках. Нужна, чтобы у третьей панели
-    /// тоже был минимум: окно знает только про ширину списка.
+    /// Window width in logical points. Needed so the third panel has a
+    /// minimum too: the window only knows the list width.
     window_w: f32,
-    /// Позиция указателя в момент, когда его последний раз двигали при
-    /// перетаскивании. Нужна, чтобы считать смещение, а не абсолютную
-    /// координату: иначе панель прыгала бы к курсору.
+    /// Pointer position at the moment it last moved during a drag. Needed to
+    /// measure the offset rather than an absolute coordinate, otherwise the
+    /// panel would jump to the cursor.
     resize_anchor: Option<f32>,
     toast: Option<(String, Instant)>,
-    /// Открыт ли редактор.
+    /// Whether the editor is open.
     editing: Option<Editing>,
-    /// Показывать корзину вместо обычных записей.
+    /// Show the trash instead of regular items.
     show_trash: bool,
-    /// Показывать отчёт аудита вместо деталей записи.
+    /// Show the audit report instead of the item details.
     show_audit: bool,
-    /// Папка, ожидающая подтверждения удаления.
+    /// Folder awaiting delete confirmation.
     ask_delete_folder: Option<String>,
-    /// Текст поля ввода новой папки или её нового названия.
+    /// Text of the new-folder / rename input.
     folder_draft: String,
-    /// Папка, к которой относится черновик. `None` — создаётся новая.
+    /// Folder the draft belongs to. `None` — a new one is created.
     folder_draft_for: Option<String>,
-    /// Активная папка: пустая строка — «все записи без фильтра по папкам».
+    /// Active folder: an empty string means "all items, no folder filter".
     ///
-    /// Отдельное поле, а не часть `kind_filter`: категория и папка — разные
-    /// вещи, и их можно применять вместе.
+    /// A field of its own rather than part of `kind_filter`: category and
+    /// folder are different things and can be applied together.
     folder_filter: String,
-    /// Что сейчас лежит в корзине вложений.
+    /// What currently sits in the attachment trash.
     trash: TrashStats,
-    /// Очистка корзины требует второго нажатия: очистка необратима.
+    /// Emptying the trash takes a second press: it cannot be undone.
     trash_armed: bool,
-    /// Сколько файлов было удалено при последней очистке — для сообщения.
+    /// How many files the last emptying removed — for the message.
     trash_just_cleared: usize,
-    /// Имя вложения, ожидающего подтверждения открепления: первое нажатие
-    /// вооружает кнопку, второе — открепляет. Файл уезжает в корзину только
-    /// при сохранении, но само открепление необратимо для черновика.
+    /// Attachment awaiting detach confirmation: the first press arms the
+    /// button, the second detaches. The file only goes to the trash on save,
+    /// but the detach itself cannot be undone for the draft.
     detach_armed: Option<String>,
-    /// Вложение, развёрнутое на большое превью.
+    /// Attachment expanded into a large preview.
     preview: Option<PathBuf>,
 }
 
-/// Версия приложения: последний тег git, иначе версия пакета.
+/// Application version: the latest git tag, otherwise the package version.
 ///
-/// Значение задаёт `crates/ui/build.rs` на этапе сборки. Держать версию
-/// константой here было ошибкой: её забывали поднимать, и панель «О
-/// приложении» показывала 1.0.0 при тегах до v1.5.0.
+/// The value is supplied by `crates/ui/build.rs` at build time. Keeping the
+/// version as a hardcoded constant here was a mistake: it kept being
+/// forgotten, and the "About" panel showed 1.0.0 at tags up to v1.5.0.
 const APP_VERSION: &str = env!("OPCLIENT_VERSION");
 
-/// Автор приложения.
+/// Application author.
 const APP_AUTHOR: &str = "Vitalii Tereshchuk";
 
-/// Страница приложения.
+/// Application home page.
 ///
-/// Раньше здесь был сайт автора целиком, но в панели «О приложении» нужна
-/// именно страница 1Lock: ради неё человек и открывает эту ссылку.
+/// This used to be the author's whole website, but the "About" panel needs
+/// the 1Lock page specifically: that is the reason someone opens this link.
 const APP_URL: &str = "https://dotoca.net/1lock";
 
-/// Подпись рядом со ссылкой в панели «О приложении».
+/// Caption next to the link in the "About" panel.
 ///
-/// macOS показывает «подпись (адрес)», и подписью был сам адрес — он
-/// печатался дважды. Слово короче и понятнее, что это ссылка.
+/// macOS renders "title (URL)", and the title was the URL itself — it got
+/// printed twice. A single word is shorter and makes it clear it is a link.
 const APP_URL_LABEL: &str = "Homepage";
 
-/// Описание для панели «О приложении».
+/// Description for the "About" panel.
 const APP_COMMENTS: &str =
     "Read and edit a 1Password export (1PIF).\nPasswords are stored in the export in plain text.";
 
-/// Строка копирайта.
+/// Copyright line.
 const APP_COPYRIGHT: &str = "© 2026, Vitalii Tereshchuk / xVoLAnD";
 
-/// Лицензия.
+/// License.
 const APP_LICENSE: &str =
     "Personal project, no warranty. Passwords in the export are not encrypted.";
 
-/// Название приложения в заголовке окна.
+/// Application name in the window title.
 const APP_TITLE: &str = "1Lock";
 
-/// Иконка приложения для заголовка окна.
+/// Application icon for the window title.
 ///
-/// Копия `assets/app-icon.png` уменьшенная до 128 px и лежит внутри
-/// репозитория: оригинал на 2048 px весит 3,5 МБ и лежит рядом с проектом,
-/// а вшивать его в бинарник незачем — в заголовке значок рисуется в 26 px.
+/// A copy of `assets/app-icon.png` scaled down to 128 px is kept inside the
+/// repository: the 2048 px original weighs 3.5 MB and sits next to the project,
+/// and embedding it in the binary is pointless — the icon is drawn at 26 px.
 const APP_ICON: &[u8] = include_bytes!("../../../assets/app-icon.png");
 
-/// Готовая картинка для заголовка окна.
+/// A ready-made image for the window title.
 ///
-/// `Handle` собирается один раз и дальше только клонируется. Если создавать
-/// его прямо в `view`, то на каждом кадре получается новый handle: iced
-/// опознаёт картинку по хешу содержимого, считает её новой и грузит заново —
-/// значок в заголовке начинает мигать.
-/// Высота полосы тулбара. Её набирают значки кнопок и иконка приложения,
-/// а поле поиска имеет собственный размер и выравнивается по середине.
+/// The `Handle` is built once and only cloned afterwards. Building it inside
+/// `view` produces a new handle on every frame: iced identifies an image by
+/// the hash of its contents, considers it new and loads it again — the icon
+/// in the title bar starts flickering.
+/// Height of the toolbar strip. The button icons and the app icon set it,
+/// while the search field keeps its own size and is centred.
 const TOOLBAR_H: f32 = 64.0;
 
-/// Иконка приложения держит всю высоту полосы: отступ по вертикали у неё
-/// нулевой, иначе рядом с ней остаётся пустое поле.
+/// The app icon spans the full toolbar height: its vertical padding is
+/// zero, otherwise empty space is left beside it.
 const APP_ICON_SIZE: f32 = TOOLBAR_H;
 
-/// Ширина панели списка по умолчанию, и за неё же цепляется минимум и
-/// максимум: за границами список перестаёт быть списком.
+/// Default list panel width, and the minimum and maximum hang off it too:
+/// past those bounds the list stops being a list.
 const LIST_WIDTH_DEFAULT: f32 = 340.0;
 const LIST_WIDTH_MIN: f32 = 220.0;
 const LIST_WIDTH_MAX: f32 = 720.0;
 
-/// Минимальная ширина правой панели. Без неё список можно растянуть до
-/// окна и закрыть всё, ради чего он и растягивается.
+/// Minimum width of the right panel. Without it the list could be stretched
+/// to the full window and cover everything it was stretched for.
 const PANEL3_MIN: f32 = 320.0;
 
-/// Ширина боковой панели: она не двигается, и из неё считается всё
-/// остальное. Совпадает с шириной во `view_sidebar`.
+/// Sidebar width: it does not move, and everything else is measured from it.
+/// Matches the width in `view_sidebar`.
 const SIDEBAR_W: f32 = 212.0;
 
-/// Ширина полосы, за которую цепляется указатель. Уже самой линии в один
-/// пиксель: иначе её почти невозможно ухватить.
+/// Width of the strip the pointer grabs. Already wider than the one-pixel
+/// line itself: otherwise it is nearly impossible to catch.
 const RESIZE_HANDLE_W: f32 = 6.0;
 
-/// Ширина кнопки тулбара. Задана явно, чтобы все три были одного размера,
-/// а не по ширине нарисованного значка.
+/// Toolbar button width. Set explicitly so all three are the same size
+/// instead of following the width of the drawn icon.
 const TOOLBAR_BTN_W: f32 = 44.0;
 
-/// Размер значков на кнопках тулбара.
+/// Icon size on toolbar buttons.
 const ICON_BUTTON_SIZE: f32 = 28.0;
 
-/// Кегль текста в поле поиска. От него зависит его высота: iced считает её
-/// как `кегль * 1.3 + 2 * отступ`, поэтому отступ приходится считать самому.
+/// Font size in the search field. The field height follows from it: iced computes
+/// it as `size * 1.3 + 2 * padding`, so the padding has to be worked out by hand.
 const SEARCH_SIZE: f32 = 13.0;
 
-/// Отступ поля поиска. Во всю высоту полосы тянется не поле, а значки
-/// кнопок: поле остаётся обычного размера и только выравнивается по
-/// середине полосы.
+/// Search field padding. It is not the field that spans the full strip
+/// height but the button icons: the field keeps its normal size and is only
+/// centred vertically.
 const SEARCH_PADDING: f32 = 5.0;
 
-/// Размер значков у кнопок в списке и у полей: они мельче заголовка.
+/// Icon size on list buttons and fields: smaller than the heading.
 const ICON_FIELD_SIZE: f32 = 13.0;
 
 fn app_icon_handle() -> iced::widget::image::Handle {
@@ -234,14 +234,14 @@ fn app_icon_handle() -> iced::widget::image::Handle {
         .clone()
 }
 
-/// Состояние формы редактирования.
+/// Editing form state.
 struct Editing {
-    /// uuid правимой записи; `None` — создаётся новая.
+    /// uuid of the item being edited; `None` — a new one is created.
     uuid: Option<String>,
-    /// Документ многострочного поля «Заметки».
+    /// Document behind the multi-line "Notes" field.
     ///
-    /// Текст живёт здесь, а не в строке: иначе при каждом нажатии клавиши
-    /// пришлось бы пересоздавать весь редактор и терять позицию курсора.
+    /// The text lives here rather than in a string: otherwise every keypress
+    /// would have to rebuild the whole editor and lose the cursor position.
     notes_doc: text_editor::Content,
     draft: EntryDraft,
     title: String,
@@ -249,88 +249,88 @@ struct Editing {
     password: String,
     url: String,
     notes: String,
-    /// Ждём подтверждения удаления.
+    /// Waiting for delete confirmation.
     confirm_delete: bool,
-    /// Папка, в которую положить запись; `None` — верхний уровень.
+    /// Folder to put the item into; `None` — the top level.
     folder: Option<String>,
-    /// Тип новой записи. У существующей записи он берётся из `typeName`.
+    /// Kind of a new item. For an existing one it is taken from `typeName`.
     kind: opclient_core::pif::ItemKind,
-    /// Второй дополнительный слот: срок и код у карты, порт у сервера.
+    /// Second extra slot: expiry and code for a card, port for a server.
     extra_b: String,
 }
 
 #[derive(Clone)]
 enum Message {
-    /// Нажата кнопка «Открыть…».
+    /// The "Open…" button was pressed.
     PickFile,
-    /// Создать новое пустое хранилище 1PIF в выбранном каталоге.
+    /// Create a new empty 1PIF vault in the chosen directory.
     CreateVault,
-    /// Открыть файл вложения в Finder или программе по умолчанию.
+    /// Open the attachment in Finder or the default app.
     OpenAttachment(PathBuf),
-    /// Начать редактирование выбранной записи.
+    /// Start editing the selected item.
     StartEdit,
-    /// Создать новую запись.
+    /// Create a new item.
     StartCreate,
-    /// Поле формы изменилось.
+    /// A form field changed.
     DraftChanged(&'static str, String),
-    /// Применить правку.
+    /// Commit the edit.
     ApplyEdit,
-    /// Закрыть редактор без сохранения.
+    /// Close the editor without saving.
     CancelEdit,
-    /// Удалить запись.
+    /// Delete the item.
     DeleteItem,
-    /// Подтвердить удаление или отменить его.
+    /// Confirm the deletion or cancel it.
     ConfirmDelete(bool),
-    /// Действие многострочного редактора заметок.
+    /// Action from the multi-line notes editor.
     EditNotes(text_editor::Action),
-    /// Перевести фокус на следующее или предыдущее поле.
+    /// Move focus to the next or the previous field.
     MoveFocus(bool),
-    /// Записать изменения в файл.
+    /// Write the changes to the file.
     SaveFile,
-    /// Показать или скрыть корзину удалённых записей.
-    /// Показать живые записи или корзину из боковой панели.
+    /// Show or hide the trash of deleted items.
+    /// Show live items or the trash, from the sidebar.
     ShowTrash(bool),
-    /// Открыть или закрыть отчёт аудита.
+    /// Open or close the audit report.
     ToggleAudit,
-    /// Переключить показ корзины.
+    /// Toggle the trash view.
     ToggleTrash,
-    /// Показать записи папки; пустая строка — снять фильтр по папкам.
+    /// Show the items of a folder; an empty string clears the folder filter.
     PickFolder(String),
-    /// Папка, ожидающая подтверждения удаления.
+    /// Folder awaiting delete confirmation.
     AskDeleteFolder(String),
-    /// Текст поля ввода папки.
+    /// Text of the folder input.
     FolderDraftChanged(String),
-    /// Выбрать папку записи в редакторе.
+    /// Pick the item's folder in the editor.
     DraftFolder(Option<String>),
-    /// Выбрать тип новой записи.
+    /// Pick the kind of the new item.
     DraftKind(opclient_core::pif::ItemKind),
-    /// Создать папку из черновика или переименовать ею активную.
+    /// Create a folder from the draft, or rename the active one with it.
     SubmitFolderDraft,
-    /// Очистить корзину вложений целиком.
+    /// Empty the attachment trash completely.
     EmptyTrash,
-    /// Снять запрос на очистку.
+    /// Cancel the emptying request.
     CancelEmptyTrash,
-    /// Выбрать файлы и прикрепить их к текущей записи.
+    /// Pick files and attach them to the current item.
     AttachFile,
-    /// Открепить вложение по имени; второе нажатие подтверждает.
+    /// Detach the attachment by name; a second press confirms.
     DetachAttachment(String),
-    /// Снять запрос на открепление.
+    /// Cancel the detach request.
     CancelDetach,
-    /// Развернуть или свернуть большое превью вложения-картинки.
+    /// Expand or collapse the large preview of an image attachment.
     TogglePreview(PathBuf),
-    /// Начали перетаскивать границу панели списка.
+    /// Started dragging the list panel border.
     ResizeStart,
-    /// Указатель вошёл на границу или сошёл с неё.
+    /// The pointer entered or left the border.
     HoverResize(bool),
-    /// Нажата левая кнопка мыши в любом месте окна.
+    /// Left mouse button pressed anywhere in the window.
     GlobalPress,
-    /// Отпущена левая кнопка мыши в любом месте окна.
+    /// Left mouse button released anywhere in the window.
     GlobalRelease,
-    /// Окно изменило размер.
+    /// The window was resized.
     WindowResized(f32),
-    /// Извлечь и закрыть открытое хранилище.
+    /// Detach and close the open vault.
     EjectVault,
-    /// Указатель сместился при перетаскивании; значение — координата X.
+    /// The pointer moved during a drag; the value is the X coordinate.
     ResizeMove(f32),
     SearchChanged(String),
     Filter(String),
@@ -342,12 +342,12 @@ enum Message {
 }
 
 impl Editing {
-    /// Форма для новой записи.
+    /// Form for a new item.
     fn create() -> Self {
         Self::edit(String::new(), EntryDraft::default())
     }
 
-    /// Форма для правки существующей записи.
+    /// Form for editing an existing item.
     fn edit(uuid: String, draft: EntryDraft) -> Self {
         Self {
             folder: None,
@@ -370,7 +370,7 @@ impl App {
     fn new(from_arg: Option<PathBuf>) -> Self {
         let mut app = Self::blank();
 
-        // Аргумент важнее запомненного пути.
+        // A command-line argument outranks the remembered path.
         if let Some(p) = from_arg.or_else(config::last_path) {
             app.open(p);
         }
@@ -378,8 +378,8 @@ impl App {
         app
     }
 
-    /// Состояние без файла. Отделено от `new`, чтобы не зависеть от
-    /// сохранённого на машине пути.
+    /// State without a file. Split out of `new` so it does not depend on a
+    /// path saved on the machine.
     fn blank() -> Self {
         Self {
             vault: None,
@@ -412,7 +412,7 @@ impl App {
         }
     }
 
-    /// Открывает файл экспорта. Возвращает, удалось ли.
+    /// Opens the export file. Returns whether it succeeded.
     fn open(&mut self, chosen: PathBuf) -> bool {
         let path = config::resolve_export(&chosen);
 
@@ -442,16 +442,16 @@ impl App {
     }
 
     fn update(&mut self, msg: Message) -> Task<Message> {
-        // Строка меню ставится здесь, а не в `main`: winit при старте цикла
-        // событий ставит своё стандартное меню поверх. Первый `update`
-        // вызывается уже после этого и на главном потоке, где muda и
-        // требует работать. Повторные вызовы `install` ничего не делают.
+        // The menu is installed here rather than in `main`: at the start of the
+        // event loop winit puts its own default menu on top. The first
+        // `update` runs after that, on the main thread where muda requires it
+        // to work. Repeated `install` calls do nothing.
         menu::install();
 
         match msg {
             Message::PickFile => {
-                // Диалог вызывается прямо здесь: `update` выполняется в
-                // главном потоке, а NSOpenPanel требует именно его.
+                // The dialog is opened right here: `update` runs on the main
+                // thread, and NSOpenPanel requires exactly that.
                 let chosen = rfd::FileDialog::new()
                     .set_title("Open 1Password export file")
                     .add_filter("1Password Export", &["1pif"])
@@ -461,7 +461,7 @@ impl App {
                 }
             }
             Message::CreateVault => {
-                // Каталог, а не файл: рядом с data.1pif живёт attachments/.
+                // A directory, not a file: data.1pif lives next to attachments/.
                 let Some(dir) = rfd::FileDialog::new()
                     .set_title("New vault: choose a folder")
                     .pick_folder()
@@ -505,8 +505,8 @@ impl App {
                     return Task::none();
                 };
 
-                // Как и `PickFile`, диалог открывается прямо в `update`:
-                // NSOpenPanel требует главного потока.
+                // As with `PickFile`, the dialog opens right inside `update`:
+                // NSOpenPanel requires the main thread.
                 let picked = rfd::FileDialog::new()
                     .set_title("Attach files to item")
                     .pick_files();
@@ -542,7 +542,7 @@ impl App {
                 self.detach_armed = None;
             }
             Message::TogglePreview(path) => {
-                // Повтор по тому же файлу сворачивает превью.
+                // Pressing the same file again collapses the preview.
                 self.preview = if self.preview.as_ref() == Some(&path) {
                     None
                 } else {
@@ -550,20 +550,20 @@ impl App {
                 };
             }
             Message::ResizeStart | Message::GlobalPress => {
-                // Нажатие мыши имеет смысл только над границей: иначе
-                // перетаскивание начиналось бы в любом месте окна.
+                // A mouse press only means something over the border:
+                // otherwise the drag would start anywhere in the window.
                 if matches!(msg, Message::GlobalPress) && !self.hover_resize {
                     return Task::none();
                 }
                 self.resizing = true;
-                // Якорь ставится по первому же смещению: в момент нажатия
-                // указатель ещё не прислал координату.
+                // The anchor is set on the first movement: at the moment of the
+                // press the pointer has not sent a coordinate yet.
                 self.resize_anchor = None;
             }
             Message::EjectVault => {
-                // Хранилище отпускается целиком: несохранённые правки
-                // хранятся в памяти, и без этого они потерялись бы молча
-                // вместе с файлом.
+                // The vault is released wholesale: unsaved edits live in
+                // memory, and without this they would be silently lost along
+                // with the file.
                 if self.has_changes() {
                     self.error =
                         Some("Unsaved changes. Save the file before ejecting.".to_string());
@@ -613,8 +613,8 @@ impl App {
                 }
             }
             Message::DraftKind(kind) => {
-                // Тип меняется только у новой записи: у существующей он
-                // привязан к структуре, которая уже записана в файл.
+                // The kind only changes for a new item: an existing one is
+                // bound to a structure that is already written to the file.
                 if let Some(e) = self.editing.as_mut() {
                     if e.uuid.is_none() {
                         e.kind = kind;
@@ -657,7 +657,7 @@ impl App {
                             e.url = value.clone();
                             e.draft.url = value;
                         }
-                        // Слоты типа: срок и код у карты, порт у сервера.
+                        // Kind-specific slots: expiry and code for a card, port for a server.
                         "extra_a" => e.draft.extra_a = value,
                         "extra_b" => {
                             e.extra_b = value.clone();
@@ -675,11 +675,11 @@ impl App {
                 self.editing = None;
             }
             Message::DeleteItem => match self.editing.as_mut() {
-                // Форма уже открыта — просто спрашиваем прямо в ней.
+                // The form is already open — just ask right inside it.
                 Some(e) => e.confirm_delete = true,
-                // Форма не открыта: открываем её на выбранной записи и
-                // сразу показываем вопрос. Иначе кнопка «Удалить» вне
-                // редактора молча ничего не делала.
+                // The form is not open: open it on the selected item and show
+                // the question right away. Otherwise the "Delete" button
+                // outside the editor silently did nothing.
                 None => {
                     if let Some(uuid) = self.selected_item().map(|i| i.uuid.clone()) {
                         if let Some(it) = self.vault.as_ref().and_then(|v| v.find(&uuid)) {
@@ -693,9 +693,9 @@ impl App {
             },
             Message::ConfirmDelete(yes) => {
                 if yes {
-                    // Подтверждение: удаляем запись, которую правили, иначе
-                    // выбранную. В форме они совпадают, но полагаться на
-                    // это нельзя — выделение могло уехать.
+                    // On confirm, delete the item that was edited, not the
+                    // selected one. In the form they coincide, but relying on
+                    // that is unsafe — the selection may have drifted.
                     let target = self
                         .editing
                         .as_ref()
@@ -705,7 +705,7 @@ impl App {
                         self.delete_uuid(&uuid);
                     }
                 } else if let Some(e) = self.editing.as_mut() {
-                    // Просто убираем вопрос, ничего не удаляем.
+                    // Simply drop the question, delete nothing.
                     e.confirm_delete = false;
                 }
             }
@@ -718,8 +718,8 @@ impl App {
                 }
             }
             Message::MoveFocus(forward) => {
-                // Готовые задачи перевода фокуса на следующее/предыдущее
-                // поле из дерева виджетов.
+                // Ready-made tasks for moving focus to the next/previous field
+                // from the widget tree.
                 return if forward {
                     focus_next()
                 } else {
@@ -731,8 +731,8 @@ impl App {
                 self.trash_armed = false;
                 self.preview = None;
                 self.detach_armed = None;
-                // Корзина и категории — взаимоисключающие разделы: в корзине
-                // показываются удалённые записи всех видов сразу.
+                // Trash and categories are mutually exclusive sections: the
+                // trash shows deleted items of every kind at once.
                 self.kind_filter.clear();
                 self.show_trash = yes;
                 self.refilter();
@@ -744,7 +744,7 @@ impl App {
                     return Task::none();
                 }
                 if self.trash_armed {
-                    // Второе нажатие — очищаем по-настоящему.
+                    // The second press really empties it.
                     let was = self.trash.files;
                     if let Some(vault) = self.vault.as_ref() {
                         vault.empty_trash();
@@ -761,7 +761,7 @@ impl App {
                     ));
                     self.trash_just_cleared = 0;
                 } else {
-                    // Первое — только спрашиваем.
+                    // The first one only asks.
                     self.trash_armed = true;
                     self.toast = Some((
                         format!(
@@ -782,10 +782,10 @@ impl App {
             }
             Message::Filter(kind) => {
                 self.ask_delete_folder = None;
-                // Повторный щелчок по активной категории снимает фильтр:
-                // иначе из неё некуда выйти, кроме как в «Все элементы».
-                // Логика живёт здесь, а не в панели, чтобы работала откуда
-                // угодно, а не только из одного места.
+                // Clicking the active category again clears the filter:
+                // otherwise there is no way out of it except "All Items". The
+                // logic lives here rather than in the panel so it works from
+                // anywhere, not just from one place.
                 let same = !kind.is_empty() && kind == self.kind_filter;
                 self.kind_filter = if same { String::new() } else { kind };
                 if !self.kind_filter.is_empty() {
@@ -804,7 +804,7 @@ impl App {
                 }
 
                 match self.folder_draft_for.clone() {
-                    // Переименование активной папки.
+                    // Renaming the active folder.
                     Some(uuid) => {
                         let ok = self
                             .vault
@@ -815,7 +815,7 @@ impl App {
                                 Some(("Folder renamed, remember to save".into(), Instant::now()));
                         }
                     }
-                    // Новая папка: сразу включаем фильтр на неё.
+                    // New folder: switch the filter to it right away.
                     None => {
                         let Some(vault) = self.vault.as_mut() else {
                             return Task::none();
@@ -831,16 +831,16 @@ impl App {
                 self.refilter();
             }
             Message::PickFolder(uuid) => {
-                // Повторный щелчок по активной папке снимает фильтр.
+                // Clicking the active folder again clears the filter.
                 self.folder_filter = if self.folder_filter == uuid {
                     String::new()
                 } else {
                     uuid.clone()
                 };
-                // Корзина показывает удалённое независимо от папок.
+                // The trash shows deletions regardless of folders.
                 self.show_trash = false;
-                // Поле ввода сразу показывает название выбранной папки: иначе
-                // переименование пришлось бы вводить заново вслепую.
+                // The input immediately shows the name of the selected folder:
+                // otherwise renaming would have to be retyped blind.
                 let title = self
                     .vault
                     .as_ref()
@@ -856,8 +856,8 @@ impl App {
                 self.refilter();
             }
             Message::AskDeleteFolder(uuid) => {
-                // Второе нажатие подтверждает: содержимое папки останется, но
-                // пропадёт из неё, и отменить это нельзя без правок вручную.
+                // The second press confirms: the contents of the folder survive,
+                // but leave it, and that cannot be undone without manual edits.
                 if self.ask_delete_folder.as_deref() == Some(uuid.as_str()) {
                     let removed = self.vault.as_mut().is_some_and(|v| v.remove_folder(&uuid));
                     self.ask_delete_folder = None;
@@ -879,8 +879,8 @@ impl App {
             }
             Message::ToggleTrash => {
                 self.ask_delete_folder = None;
-                // Корзина и категории взаимоисключающие: показывать удалённое
-                // вместе с фильтром по виду бессмысленно.
+                // Trash and categories are mutually exclusive: showing
+                // deletions together with a kind filter makes no sense.
                 self.trash_armed = false;
                 self.show_audit = false;
                 self.show_trash = !self.show_trash;
@@ -891,8 +891,8 @@ impl App {
             }
             Message::ToggleAudit => {
                 self.ask_delete_folder = None;
-                // Аудит — не раздел списка, а замена правой панели: выделение
-                // с него снимается, а корзина закрывается.
+                // Audit is not a list section but a replacement for the right
+                // panel: the selection is cleared and the trash is closed.
                 self.show_audit = !self.show_audit;
                 if self.show_audit {
                     self.show_trash = false;
@@ -903,10 +903,10 @@ impl App {
                 self.refilter();
             }
             Message::Select(i) => {
-                // Выбор записи из отчёта аудита возвращает к обычному виду.
+                // Selecting an item from the audit report returns to the normal view.
                 self.show_audit = false;
-                // Вооружённое открепление относится к конкретному файлу: при
-                // уходе на другую запись подтверждение теряет смысл.
+                // An armed detach belongs to one specific file: moving to
+                // another item makes the confirmation meaningless.
                 self.detach_armed = None;
                 self.preview = None;
                 self.selected = Some(i);
@@ -945,8 +945,8 @@ impl App {
         let tick = iced_futures::backend::native::smol::time::every(Duration::from_millis(500))
             .map(Message::Tick);
         let tab = keyboard::listen().filter_map(|event| match event {
-            // Tab и Shift+Tab переводят фокус. Shift передаётся флагом
-            // в третьем аргументе события.
+            // Tab and Shift+Tab move focus. Shift arrives as a flag in the
+            // third argument of the event.
             keyboard::Event::KeyPressed {
                 key: key::Key::Named(key::Named::Tab),
                 modifiers,
@@ -956,10 +956,10 @@ impl App {
         });
         let menu_events = menu::events();
 
-        // Мышь слушается глобально, а не через MouseArea: тот присылает
-        // движение только пока курсор над ним самим. Уведённый на пару
-        // пикселей в сторону указатель обрывал перетаскивание, и панель
-        // почти не двигалась.
+        // The mouse is listened to globally rather than through a MouseArea:
+        // the latter only sends movement while the cursor is over it itself.
+        // A pointer nudged a couple of pixels aside cut the drag short, and
+        // the panel barely moved.
         let resize_events = iced_futures::event::listen_with(|event, _, _| match event {
             iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) => {
                 Some(Message::GlobalPress)
@@ -979,14 +979,14 @@ impl App {
         Subscription::batch([tick, tab, menu_events, resize_events])
     }
 
-    /// Выбранная запись.
+    /// The selected item.
     fn selected_item(&self) -> Option<&PifItem> {
         let idx = self.selected?;
         let pos = *self.entries.get(idx)?;
         self.vault.as_ref()?.items.get(pos)
     }
 
-    /// Вносит правку из формы: новая запись или изменение существующей.
+    /// Applies the edit from the form: a new item or a change to an existing one.
     fn apply_edit(&mut self) {
         let Some(editing) = self.editing.take() else {
             return;
@@ -995,16 +995,16 @@ impl App {
             return;
         };
 
-        // Новая запись без явного выбора папки попадает в ту, что открыта в
-        // боковой панели: иначе «новый элемент» из папки исчезал бы из неё же.
+        // A new item with no explicit folder choice lands in the folder open in
+        // the sidebar: otherwise a "new item" made from a folder would vanish.
         let mut folder = editing.folder.clone();
         if folder.is_none() && editing.uuid.is_none() && !self.folder_filter.is_empty() {
             folder = Some(self.folder_filter.clone());
         }
         let folder = folder.as_deref();
 
-        // Правку вносим в хранилище, а список пересобираем после того,
-        // как заим mutable-доступ отпущен.
+        // The edit goes into the vault, and the list is rebuilt only after the
+        // mutable borrow has been released.
         let outcome: Result<Option<String>, ()> = match editing.uuid.clone() {
             Some(uuid) => match vault.find_mut(&uuid) {
                 Some(item) => {
@@ -1029,7 +1029,7 @@ impl App {
                 self.editing = None;
                 self.refilter();
                 if let Some(uuid) = uuid {
-                    // Выделить правленую или только что созданную запись.
+                    // Select the edited or just-created item.
                     self.select_uuid(&uuid);
                 }
                 let word = if editing.uuid.is_some() {
@@ -1046,7 +1046,7 @@ impl App {
         }
     }
 
-    /// Удаляет запись по uuid.
+    /// Deletes an item by uuid.
     fn delete_uuid(&mut self, uuid: &str) {
         let Some(vault) = self.vault.as_mut() else {
             return;
@@ -1060,7 +1060,7 @@ impl App {
         }
     }
 
-    /// Записывает файл вместе с резервной копией.
+    /// Writes the file along with a backup copy.
     fn save_file(&mut self) {
         let Some(path) = self.path.clone() else {
             return;
@@ -1072,7 +1072,7 @@ impl App {
             Ok(()) => {
                 self.trash = vault.trash_stats();
                 vault.mark_saved();
-                // Файлы разобраны и разложены по диску — вооружение сбрасываем.
+                // The files are unpacked and laid out on disk — disarm.
                 self.detach_armed = None;
                 self.preview = None;
                 self.toast = Some(("Saved".into(), Instant::now()));
@@ -1083,7 +1083,7 @@ impl App {
         }
     }
 
-    /// Пересобирает `entries` по текущему фильтру и поисковой строке.
+    /// Rebuilds `entries` from the current filter and search string.
     fn refilter(&mut self) {
         self.entries = match &self.vault {
             Some(v) => filter_indices(
@@ -1103,7 +1103,7 @@ impl App {
         };
     }
 
-    /// Уникальные типы записей для кнопок фильтра.
+    /// Unique item kinds for the filter buttons.
     fn view(&self) -> Element<'_, Message> {
         let body: Element<'_, Message> = match &self.vault {
             None => self.view_welcome(),
@@ -1118,7 +1118,7 @@ impl App {
         page
     }
 
-    /// Форма редактирования: создание или правка.
+    /// Editing form: creation or modification.
     fn view_editor(&self) -> Element<'_, Message> {
         let Some(e) = &self.editing else {
             return center_text("Select an item");
@@ -1137,8 +1137,8 @@ impl App {
             .into(),
         );
 
-        // Выбор типа — только у новой записи. У существующей тип привязан к
-        // структуре, которая уже лежит в файле, и смена ничего бы не значила.
+        // The kind is picked only for a new item. An existing one is bound to a
+        // structure that is already in the file, and a change would mean nothing.
         if e.uuid.is_none() {
             let mut chips: Vec<Element<'_, Message>> = Vec::with_capacity(9);
             for kind in opclient_core::pif::ItemKind::all() {
@@ -1159,9 +1159,9 @@ impl App {
             ));
         }
 
-        // Подписи полей зависят от типа: в карте «логин» — это владелец,
-        // а в лицензии — ключ. Пустая подпись означает, что слот этому типу
-        // не нужен и поле не рисуется.
+        // Field captions depend on the kind: in a card "login" is the holder,
+        // in a licence it is the key. An empty caption means the kind does not
+        // need that slot and the field is not drawn.
         let labels = e.kind.field_labels();
         for (slot, (value, key)) in [
             (&e.username, "username"),
@@ -1177,19 +1177,19 @@ impl App {
             }
         }
 
-        // Срок действия у карты вводится одной строкой «MM/YYYY» и
-        // разворачивается в два ключа при сохранении. Идёт раньше кода: в
-        // карточке человек читает номер, потом срок, и только потом код.
+        // Card expiry is entered as a single "MM/YYYY" line and expands into
+        // two keys on save. It comes before the code: in a card people read
+        // the number, then the expiry, and only then the code.
         if e.kind == opclient_core::pif::ItemKind::CreditCard {
             rows.push(input_row("Expiry Date", &e.draft.extra_a, "extra_a"));
         }
-        // Второй дополнительный слот: код у карты, порт у сервера.
+        // Second extra slot: code for a card, port for a server.
         if !labels[4].is_empty() {
             rows.push(input_row(labels[4], &e.extra_b, "extra_b"));
         }
 
-        // Заметки многострочные: в выгрузке они почти всегда с переносами,
-        // поэтому однострочное поле потеряло бы строки.
+        // Notes are multi-line: in an export they almost always contain line
+        // breaks, so a single-line field would swallow them.
         let notes: Element<'_, Message> = iced::widget::text_editor(&e.notes_doc)
             .placeholder("Notes")
             .height(Length::Fixed(140.0))
@@ -1198,8 +1198,8 @@ impl App {
             .into();
         rows.push(field("Notes", notes));
 
-        // Папка выбирается списком, а не вводом: названия папок уже есть в
-        // хранилище, вводить их второй раз незачем.
+        // The folder is picked from a list rather than typed: the folder names
+        // are already in the vault, there is no point entering them again.
         let folder_row: Element<'_, Message> = {
             let options: Vec<Element<'_, Message>> = self
                 .vault
@@ -1314,15 +1314,15 @@ impl App {
             chip_toolbar,
         );
 
-        // Путь и то, что набрано в поиске, — белые. На градиенте серый
-        // текст терялся: тёмный справа, он почти сливался с фоном.
-        // Путь и «no file selected» взяты в скобки: без них строка читалась
-        // как часть названия «1Password — Export», а это сведения о файле.
+        // The path and whatever is typed into search are white. Grey text was lost
+        // against the gradient: dark on the right, it nearly merged into the background.
+        // The path and "no file selected" are parenthesised: without them the line read
+        // as part of the "1Password — Export" title, when it is really file information.
         //
-        // Перенос запрещён: на второй строке путь ломал высоту полосы, а
-        // вместе с ней и общее положение заголовка. Длина ограничена
-        // `PATH_MAX_CHARS`, а не шириной: `iced` не даёт измерить текст из
-        // `view`, и многоточие на месте обреза поставить нечем.
+        // Wrapping is off: on a second line the path broke the bar's height, and with it
+        // the title's whole position. The length is capped by `PATH_MAX_CHARS` rather
+        // than by width, because `iced` offers no way to measure text inside `view`, so
+        // there is nothing to hang an ellipsis on at the cut.
         let file: Element<'_, Message> = match &self.path {
             Some(p) => iced::widget::text(ellipsize(
                 &format!("({})", short_path(p)),
@@ -1339,13 +1339,13 @@ impl App {
                 .into(),
         };
 
-        // Иконка приложения слева от названия, во всю высоту строки заголовка.
-        // Отступ задан контейнером: прижатый к краю значок слипается с границей
-        // окна и читается как элемент управления, а не как подпись.
+        // The app icon sits left of the title, at the full height of the title
+        // row. The padding comes from the container: an icon flush against the
+        // edge melts into the window border and reads as a control, not a label.
         let mark: Element<'_, Message> = iced::widget::container(
             iced::widget::image(app_icon_handle())
-                // Размер обязателен: без него картинка рисуется в исходных
-                // 128 px и раздувает всю строку заголовка.
+                // The size is mandatory: without it the image draws at its
+                // native 128 px and inflates the entire title row.
                 .width(Length::Fixed(APP_ICON_SIZE))
                 .height(Length::Fixed(APP_ICON_SIZE))
                 .content_fit(iced::ContentFit::Contain),
@@ -1354,44 +1354,44 @@ impl App {
         .width(Length::Shrink)
         .into();
 
-        // Ширина задана контейнером с `Fill`, и это не косметика. Ряд слева
-        // сам по себе `Shrink`, а `iced` раскладывает `Shrink` первым и
-        // отдаёт ему всю оставшуюся ширину: заголовок и путь занимают
-        // сколько могут, и до кнопок места уже не хватает. Тогда flex
-        // ужимает последнего ребёнка, и «New vault» становится заметно уже
-        // остальных, а значок в ней — ещё и мельче, потому что контейнер
-        // сжимает содержимое. С `Fill` блок уходит на второй проход: сначала
-        // раскладываются кнопки и получают свои размеры, и ужимается текст.
+        // The width is set by the `Fill` container, and that is not cosmetic. The
+        // row on the left is `Shrink` on its own, and `iced` lays out `Shrink`
+        // first and hands it all the remaining width: the title and the path take
+        // as much as they can, and there is no room left for the buttons. Flex then
+        // shrinks the last child, so "New vault" ends up noticeably narrower than
+        // the rest and its icon smaller still, because the container squeezes its
+        // contents. With `Fill` the block moves to the second pass: the buttons are
+        // laid out first and get their sizes, and the text is what gets squeezed.
         //
-        // Отдельного `Space::new().width(Fill)` в ряду больше нет: вместе с
-        // этим блоком он делил остаток пополам, и путь получал вдвое меньше
-        // места, чем раньше. Единственный `Fill` забирает остаток целиком, но
-        // текст в нём выровнен по левому краю, так что на вид ничего не
-        // меняется, а путь снова занимает всю доступную ширину.
+        // There is no longer a separate `Space::new().width(Fill)` in the
+        // row: alongside this block it split the remainder in half, so the
+        // path got half the room it used to. The single `Fill` takes the
+        // whole remainder, but the text in it is left-aligned, so nothing
+        // looks different and the path again gets all the available width.
         let left: Element<'_, Message> = iced::widget::container(
             iced::widget::row(vec![mark, title, file])
                 .spacing(10.0)
                 .align_y(Center),
         )
         .width(Length::Fill)
-        // Бюджет знаков не может следить за шириной окна, поэтому на узком
-        // окне путь окажется длиннее отведённого места. Без обрезки он
-        // наезжал бы на поле поиска; с ней просто срезается по краю.
+        // A character budget cannot follow the window width, so on a narrow window
+        // the path ends up longer than the room allotted. Without clipping it would
+        // run into the search field; with it, the path is simply cut off at the edge.
         .clip(true)
         .into();
 
         let head: Element<'_, Message> = if self.vault.is_some() {
-            // Высота задаётся отступом самого поля, а не контейнером:
-            // контейнер растягивает рамку, а рамка рисуется на своей
-            // естественной высоте, и рядом с кнопками она садилась выше.
+            // The height comes from the field's own padding, not from the container:
+            // the container stretches the border box, while the border draws at its
+            // natural height, and next to the buttons it then sat too high.
             let search = iced::widget::text_input("Search…", &self.query_input)
                 .on_input(|v| Message::SearchChanged(v.clone()))
                 .size(SEARCH_SIZE)
                 .padding(Padding::new(SEARCH_PADDING).horizontal(10.0))
                 .width(Length::Fixed(240.0))
-                // Поле прозрачное: своя плашка поверх градиента выглядела
-                // бы вставленной. Под наведением и при фокусе рамка
-                // появляется, иначе искать нечем.
+                // The field is transparent: a plate of its own laid over the
+                // gradient would look pasted on. The border appears on hover
+                // and on focus — otherwise there is nothing to search with.
                 .style(|_t: &Theme, status: iced::widget::text_input::Status| {
                     use iced::widget::text_input::Status as S;
                     let active = matches!(status, S::Focused { .. } | S::Hovered);
@@ -1444,9 +1444,9 @@ impl App {
                 chip_toolbar,
             ));
 
-            // Единообразный тулбар: та же поверхность и те же поля, что у
-            // боковой панели, и волосяная линия снизу. Иначе стык тулбара с
-            // панелью виден как разница в оттенке и в отступах.
+            // One uniform toolbar: the same surface and the same insets as the
+            // sidebar, plus a hairline along the bottom. Otherwise the seam between
+            // toolbar and panel shows up as a difference in shade and in padding.
             iced::widget::container(
                 iced::widget::row(vec![
                     left,
@@ -1457,8 +1457,8 @@ impl App {
                         .into(),
                 ])
                 .spacing(10.0)
-                // Без выравнивания по середине поле поиска прижимается к
-                // верху полосы: её высоту набирают кнопки во всю высоту.
+                // Without centring, the search field sticks to the top of the
+                // bar: its height is set by the buttons at full height.
                 .align_y(Center)
                 .padding(Padding::new(8.0).horizontal(14.0).vertical(8.0)),
             )
@@ -1474,8 +1474,8 @@ impl App {
             })
             .into()
         } else {
-            // Кнопки в пустом хранилище те же и того же размера: полоса не
-            // должна менять вид после открытия файла.
+            // The buttons in an empty vault are the same ones at the same
+            // size: the bar must not change its look once a file is opened.
             iced::widget::container(
                 iced::widget::row(vec![
                     left,
@@ -1509,13 +1509,13 @@ impl App {
             .into()
         };
 
-        // Подписи «сколько записей и по чему отфильтровано» над списком
-        // больше нет: то же самое пишет строка состояния внизу, а активный
-        // раздел и так подсвечен в боковой панели, корзина видна там же.
+        // The caption above the list saying how many entries there are and what they are
+        // filtered by is gone: the status line at the bottom says the same, the active section
+        // is highlighted in the sidebar anyway, and the trash is visible right there too.
         head
     }
 
-    /// Стартовый экран: предложение выбрать файл.
+    /// Start screen: an invitation to pick a file.
     fn view_welcome(&self) -> Element<'_, Message> {
         let hint: Element<'_, Message> = match &self.error {
             Some(e) => iced::widget::text(e.clone()).size(12.0).color(Color::from_rgb(1.0, 0.5, 0.5)).into(),
@@ -1563,10 +1563,10 @@ impl App {
         .into()
     }
 
-    /// Основной экран: список и детали.
+    /// Main screen: the list and the details.
     fn view_browser(&self) -> Element<'_, Message> {
-        // Через .get(): если список фильтра отстал от хранилища, экран
-        // должен показаться пустым, а не упасть.
+        // Through .get(): if the filtered list lags behind the vault, the
+        // screen should come up empty rather than panic.
         let selected = self
             .selected
             .and_then(|i| self.entries.get(i).copied())
@@ -1586,9 +1586,9 @@ impl App {
             }
         };
 
-        // Волосяная линия между панелью и списком. У iced 0.14 у Border нет
-        // граней по сторонам, поэтому линия рисуется отдельной полоской в
-        // один пиксель.
+        // The hairline between the panel and the list. In iced 0.14 Border has
+        // no per-side faces, so the line is drawn as a separate one-pixel
+        // strip.
         let hairline: Element<'_, Message> =
             iced::widget::container(iced::widget::text("").size(1.0))
                 .width(Length::Fixed(1.0))
@@ -1599,9 +1599,9 @@ impl App {
                 })
                 .into();
 
-        // Граница панели списка: за неё панель тянут мышью. Линия в один
-        // пиксель осталась бы на месте, а полоса под неё даёт указателю
-        // куда цепиться и меняет курсор на двустороннюю стрелку.
+        // The edge of the list panel: the panel is dragged by it. A one-pixel
+        // line would stay put, while the strip behind it gives the pointer
+        // something to grab and turns the cursor into a two-headed arrow.
         let resize_handle: Element<'_, Message> = iced::widget::mouse_area(
             iced::widget::container(iced::widget::text("").size(1.0))
                 .width(Length::Fill)
@@ -1617,8 +1617,8 @@ impl App {
         })
         .into();
 
-        // Размер полосы задаёт контейнер: у MouseArea своего метода для
-        // ширины нет.
+        // The container sets the strip's size: MouseArea has no width
+        // method of its own.
         let resize_handle: Element<'_, Message> = iced::widget::container(resize_handle)
             .width(Length::Fixed(RESIZE_HANDLE_W))
             .height(Length::Fill)
@@ -1644,11 +1644,11 @@ impl App {
         .into()
     }
 
-    /// Принимает только что созданное хранилище.
+    /// Adopts the vault that was just created.
     ///
-    /// Повторяет [`App::open`], но берёт каталог: путь к файлу известен заранее
-    /// и не подлежит разрешению, а открывать только что записанный файл с
-    /// диска незачем — он уже в руках.
+    /// Mirrors [`App::open`] but takes a directory: the file path is known up
+    /// front and needs no resolving, and re-reading a file we have only just
+    /// written from disk is pointless — we are already holding it.
     fn open_created(&mut self, dir: &std::path::Path, vault: Pif) {
         let path = dir.join("data.1pif");
 
@@ -1669,10 +1669,10 @@ impl App {
         config::remember(&path);
     }
 
-    /// Держит ширину списка в допустимых пределах.
+    /// Keeps the list width within the allowed range.
     ///
-    /// Верхняя граница считается от ширины окна, а не задана числом:
-    /// панель справа тоже не должна схлопываться в узкую полоску.
+    /// The upper bound is computed from the window width instead of being a fixed
+    /// number: the panel on the right must not collapse into a narrow strip either.
     fn clamp_list_width(&mut self) {
         let mut max = LIST_WIDTH_MAX;
         if self.window_w > 0.0 {
@@ -1682,10 +1682,10 @@ impl App {
         self.list_width = self.list_width.clamp(LIST_WIDTH_MIN, max);
     }
 
-    /// Сколько живых записей каждого вида.
+    /// How many live entries of each kind there are.
     ///
-    /// Считаются только живые: корзина — отдельный раздел, и в счётчиках
-    /// категорий она бы сбивала толку.
+    /// Only live ones are counted: the trash is a separate section, and in
+    /// the per-category counters it would throw the numbers off.
     fn kind_counts(&self) -> Vec<(String, usize)> {
         use std::collections::BTreeMap;
         let Some(vault) = self.vault.as_ref() else {
@@ -1702,11 +1702,11 @@ impl App {
         counts.into_iter().collect()
     }
 
-    /// Строка записи в отчёте аудита: название и переход к самой записи.
+    /// An entry row in the audit report: the name, and a jump to the entry.
     ///
-    /// Записи может не быть в текущем списке — например, она отфильтрована
-    /// категорией или лежит в корзине. Тогда строка некликабельна, и об этом
-    /// сказано подсказкой, а не молчанием.
+    /// The entry may not be in the current list — filtered out by category,
+    /// or sitting in the trash, say. Then the row is not clickable, and the
+    /// note says so rather than falling silent.
     fn entry_row<'a>(
         app: &'a App,
         vault: &'a Pif,
@@ -1753,11 +1753,11 @@ impl App {
         }
     }
 
-    /// Отчёт аудита безопасности.
+    /// The security audit report.
     ///
-    /// Пароли наружу не выводятся: показываются только названия записей и
-    /// счётчики, иначе панель аудита стала бы вторым местом, где секрет лежит
-    /// открытым текстом.
+    /// Passwords are never printed: only entry names and counters are shown,
+    /// otherwise the audit panel would become a second place where the
+    /// secret sits in plain text.
     fn view_audit(&self) -> Element<'_, Message> {
         let Some(vault) = self.vault.as_ref() else {
             return center_text("No file open");
@@ -1771,8 +1771,8 @@ impl App {
 
         let mut col: Vec<Element<'_, Message>> = Vec::new();
 
-        // Значок щита слева от заголовка — тот же приём, что и в панели деталей:
-        // у раздела свой значок, чтобы он не путался со значками записей.
+        // The shield icon left of the heading is the same device as in the details panel:
+        // the section gets an icon of its own so it cannot be mistaken for an entry icon.
         col.push(
             iced::widget::row(vec![
                 icons::icon(icons::Icon::Audit, 26.0, TEXT_DIM).into(),
@@ -1822,8 +1822,8 @@ impl App {
         );
         col.push(iced::widget::Space::new().height(18.0).into());
 
-        // Списки названий. Переход к записи — обычный Select, аудит при этом
-        // закрывается, чтобы пользователь увидел саму запись.
+        // Lists of names. Jumping to an entry is an ordinary Select, and the audit
+        // closes along the way so the user actually gets to see the entry itself.
         let list = |title: &str, items: &[opclient_core::audit::Flagged], empty: &str| {
             let mut part: Vec<Element<'_, Message>> = vec![iced::widget::text(title.to_string())
                 .size(14.0)
@@ -1890,18 +1890,18 @@ impl App {
         iced::widget::scrollable(iced::widget::column(col).spacing(4.0).padding(20.0)).into()
     }
 
-    /// Боковая панель: разделы и категории, как в 1Password.
+    /// Sidebar: sections and categories, as in 1Password.
     fn view_sidebar(&self) -> Element<'_, Message> {
         let alive = self.vault.as_ref().map_or(0, |v| v.alive().len());
         let trashed = self.vault.as_ref().map_or(0, |v| v.trashed().len());
 
         let mut col: Vec<Element<'_, Message>> = Vec::new();
 
-        // Заголовок секции: подпись мелким шрифтом, рядом значок секции.
+        // Section heading: a small-type caption with the section icon next to it.
         //
-        // Значок ставится здесь, а не в каждой строке: иначе значок папки
-        // повторился бы напротив каждой папки, а значок сетки — напротив
-        // каждого вида записи. Это ровно то, как разделяют секции 1Password.
+        // The icon is placed here rather than in every row: otherwise the folder
+        // icon would repeat next to every folder, and the grid icon next to every
+        // kind of item. That is exactly how 1Password separates its sections.
         let heading = |t: &str, mark: icons::Icon| -> Element<'_, Message> {
             iced::widget::row(vec![
                 icons::icon(mark, 14.0, TEXT_DIM).into(),
@@ -1914,12 +1914,12 @@ impl App {
             .into()
         };
 
-        // Строка раздела: значок, подпись, счётчик.
+        // Section row: icon, label, counter.
         //
-        // Значок опционален только для папок: они названы пользователем, и
-        // рисовать напротив каждой одинаковый значок папки незачем. У видов
-        // значок совпадает с типом записи, поэтому он несёт смысл, а не
-        // украшает.
+        // The icon is optional only for folders: they are named by the user,
+        // and painting the same folder icon beside each of them is pointless.
+        // For kinds the icon matches the item type, so it carries meaning
+        // rather than decoration.
         let section = |label: String,
                        count: Option<usize>,
                        active: bool,
@@ -1939,8 +1939,8 @@ impl App {
                     .into(),
             );
             cells.push(iced::widget::Space::new().width(Length::Fill).into());
-            // У разделов без счётчика (Tools) числа нет: ноль означал бы
-            // «ничего не нашлось», а это не так.
+            // Sections with no counter (Tools) get no number: a zero would
+            // read as "nothing found", which is not the case here.
             if let Some(count) = count {
                 cells.push(
                     iced::widget::text(count.to_string())
@@ -1973,14 +1973,14 @@ impl App {
         for (kind, count) in self.kind_counts() {
             let active = self.kind_filter == kind && !self.show_trash;
             let msg = Message::Filter(kind.clone());
-            // Значок вычисляем до передачи подписи: `section` забирает строку
-            // по значению, и обращение к ней после этого невозможно.
+            // Compute the icon before handing over the label: `section` takes
+            // the string by value, so it cannot be referenced afterwards.
             let mark = icons::Icon::for_kind(&kind);
             col.push(section(kind, Some(count), active, msg, Some(mark)));
         }
 
-        // Папки — единственное, что пользователь может завести сам: это
-        // обычные записи system.folder.Regular, а не проекция типа записи.
+        // Folders are the only thing the user can create by hand: they are ordinary
+        // system.folder.Regular records, not a projection of an item type.
         let folders: Vec<(String, String, usize)> = self
             .vault
             .as_ref()
@@ -1998,8 +1998,8 @@ impl App {
             })
             .unwrap_or_default();
 
-        // Виджеты нельзя использовать дважды, поэтому каждый раз собираем их
-        // заново: строка ввода нужна и для новой папки, и для переименования.
+        // Widgets cannot be used twice, so they are rebuilt each time: the
+        // input row is needed both to create a new folder and to rename one.
         let make_input = |placeholder: &str| -> Element<'_, Message> {
             iced::widget::text_input(placeholder, &self.folder_draft)
                 .on_input(Message::FolderDraftChanged)
@@ -2031,8 +2031,8 @@ impl App {
             }
         }
 
-        // Строка ввода: при выбранной папке переименовывает её, иначе
-        // создаёт новую.
+        // The input row: with a folder selected it renames that folder,
+        // otherwise it creates a new one.
         let placeholder = if selected_folder.is_empty() {
             "New folder"
         } else {
@@ -2086,9 +2086,9 @@ impl App {
             ));
         }
 
-        // От края до края: панель идёт во всю высоту окна, поля только по
-        // бокам, а справа — волосяная линия вместо рамки. В macOS 27 так же
-        // оформлены боковые панели.
+        // Edge to edge: the panel runs the full height of the window, is
+        // inset only at the sides, and on the right gets a hairline instead
+        // of a border. macOS 27 dresses its sidebars the same way.
         iced::widget::container(
             iced::widget::column(col)
                 .spacing(4.0)
@@ -2112,12 +2112,12 @@ impl App {
         };
 
         let mut items: Vec<Element<'_, Message>> = Vec::with_capacity(self.entries.len());
-        // Буква, для которой уже напечатан разделитель. Список отсортирован по
-        // названию, поэтому одинаковые буквы идут подряд.
+        // The letter whose divider has already been printed. The list is
+        // sorted by title, so identical letters come in runs.
         let mut last_letter: Option<char> = None;
 
         for (pos, &idx) in self.entries.iter().enumerate() {
-            // Пропускаем индексы, уже несуществующие в хранилище.
+            // Skip indices that no longer exist in the vault.
             let Some(it) = vault.items.get(idx) else {
                 continue;
             };
@@ -2150,8 +2150,8 @@ impl App {
             .spacing(6.0)
             .into();
 
-            // Значок вида слева от названия и на всю высоту строки: так он
-            // читается как метка типа, а не как украшение.
+            // The kind's icon sits left of the title and spans the full row
+            // height: that way it reads as a type label rather than as decoration.
             let mark: Element<'_, Message> =
                 icons::icon(icons::Icon::for_kind(it.kind()), 17.0, TEXT_DIM).into();
 
@@ -2179,8 +2179,8 @@ impl App {
                 .next()
                 .filter(|c| c.is_alphanumeric());
 
-            // Группа меняется и на цифрах, но заголовок для них не рисуется:
-            // «1Password» и «35AWARDS» в 1Password идут подряд без буквы.
+            // The group also changes on digits, but no heading is drawn for them: "1Password"
+            // and "35AWARDS" sit next to each other in 1Password without a letter between them.
             if letter != last_letter {
                 if letter.is_some_and(char::is_alphabetic) {
                     items.push(
@@ -2200,7 +2200,7 @@ impl App {
     fn view_details(&self, it: &PifItem) -> Element<'_, Message> {
         let mut b: Vec<Element<'_, Message>> = Vec::new();
 
-        // Первая строка панели: значок вида слева от названия.
+        // The panel's first row: the kind's icon left of the title.
         b.push(
             iced::widget::row(vec![
                 icons::icon(icons::Icon::for_kind(it.kind()), 26.0, TEXT_DIM).into(),
@@ -2353,14 +2353,14 @@ impl App {
             }
         }
 
-        // Поля, специфичные для типа: номер карты, срок, POP/SMTP, ключ
-        // лицензии. У веб-форм их нет, у кошелька — основная часть записи.
+        // Type-specific fields: card number, expiry, POP/SMTP, licence key.
+        // A web form has none of them; a wallet is mostly them.
         for (label, value, secret) in it.extra_fields() {
             b.push(self.extra_row(&it.uuid, &label, &value, secret));
         }
 
-        // Блок рисуется всегда, а не только когда вложения уже есть:
-        // иначе к первому файлу негде добраться.
+        // The block is always drawn, not only once attachments exist:
+        // otherwise there is nowhere to reach the first file from.
         let attachable = self.attachment_target();
         let mut attach_row: Vec<Element<'_, Message>> = Vec::new();
 
@@ -2425,8 +2425,8 @@ impl App {
 
                 let mut widgets = vec![label, open, drop];
 
-                // Миниатюра есть только у файла, который уже лежит на диске:
-                // несохранённый прикреплённый файл превью показать неоткуда.
+                // Only a file already sitting on disk gets a thumbnail: there is nowhere
+                // to render a preview of an attachment that has not been saved yet.
                 let viewable = a.pending_source.is_none() && is_image(&a.path) && a.path.exists();
                 if viewable {
                     let thumb: Element<'_, Message> =
@@ -2458,8 +2458,8 @@ impl App {
                     .align_y(Center)
                     .into();
 
-                // Развёрнутое превью живёт под своей строкой, а не поверх
-                // списка: так не нужно гадать, какому файлу оно принадлежит.
+                // The expanded preview lives under its own row rather than over the
+                // list, so there is never any doubt about which file it belongs to.
                 if viewable && self.preview.as_ref() == Some(&a.path) {
                     rows.push(row);
                     rows.push(
@@ -2490,11 +2490,11 @@ impl App {
         iced::widget::scrollable(iced::widget::column(b).spacing(12.0).padding(20.0)).into()
     }
 
-    /// Выделяет запись по uuid.
+    /// Selects an entry by uuid.
     ///
-    /// Позиция ищется именно в отфильтрованном и отсортированном списке,
-    /// который видит пользователь: в хранилище записи лежат в порядке
-    /// файла, а показываются по алфавиту.
+    /// The position is looked up in the filtered and sorted list the user
+    /// actually sees: in the vault the entries sit in file order, while they
+    /// are displayed alphabetically.
     fn select_uuid(&mut self, uuid: &str) -> bool {
         let Some(vault) = &self.vault else {
             return false;
@@ -2512,28 +2512,28 @@ impl App {
         }
     }
 
-    /// Есть ли несохранённые изменения.
+    /// Whether there are unsaved changes.
     fn has_changes(&self) -> bool {
         self.vault.as_ref().is_some_and(Pif::has_changes)
     }
 
-    /// Файлы вложений записи.
+    /// The attachment files of an entry.
     fn attachments_of(&self, uuid: &str) -> Option<Vec<opclient_core::pif::Attachment>> {
         let files = self.vault.as_ref()?.attachments.get(uuid)?;
         (!files.is_empty()).then(|| files.clone())
     }
 
-    /// Есть ли вложения, которые ещё не записаны на диск.
+    /// Whether there are attachments that have not been written to disk yet.
     fn attachments_pending(&self) -> bool {
         self.vault
             .as_ref()
             .is_some_and(opclient_core::pif::Pif::attachments_changed)
     }
 
-    /// Прикрепляет файлы к записи без диалога: вынесено отдельно, чтобы
-    /// перенос проверялся тестом — `NSOpenPanel` в тесте не открыть.
+    /// Attaches files to an entry without a dialog: split out separately so that the
+    /// copy itself can be covered by a test — `NSOpenPanel` cannot be opened in a test.
     ///
-    /// Возвращает, сколько прикрепилось и имена тех, кто не прикрепился.
+    /// Returns how many were attached and the names of those that were not.
     fn attach_paths(&mut self, uuid: &str, sources: &[PathBuf]) -> (usize, Vec<String>) {
         let mut added = 0usize;
         let mut failed = Vec::new();
@@ -2545,8 +2545,8 @@ impl App {
                 .unwrap_or_default();
             match self.vault.as_mut().map(|v| v.attach(uuid, source)) {
                 Some(Ok(_)) => added += 1,
-                // Отдельно отличать «нет хранилища» от «ошибка чтения» смысла
-                // нет: пользователю в обоих случаях нужно одно и то же.
+                // Telling "no vault" apart from "read error" would serve no
+                // purpose: the user needs the same thing in both cases.
                 _ => failed.push(name),
             }
         }
@@ -2554,12 +2554,12 @@ impl App {
         (added, failed)
     }
 
-    /// Запись, к которой относятся действия над вложениями.
+    /// The entry that attachment actions apply to.
     ///
-    /// Пока открыт редактор, subject — именно он: правимая запись важнее
-    /// выделенной, иначе файл из формы новой записи ушёл бы в соседнюю.
-    /// `None` у создаваемой записи — у неё ещё нет uuid, а каталог
-    /// вложений называется именно по нему.
+    /// While the editor is open, the subject is that one: the item being edited
+    /// matters more than the selected one, otherwise a file attached from a new-entry
+    /// form would land on its neighbour. `None` for an entry being created — it has
+    /// no uuid yet, and the attachment directory is named after exactly that.
     fn attachment_target(&self) -> Option<String> {
         match self.editing.as_ref() {
             Some(e) => e.uuid.clone(),
@@ -2567,8 +2567,8 @@ impl App {
         }
     }
 
-    /// Строка специфичного поля. Секретные значения замаскированы, пока их
-    /// явно не раскрыли; обычные показываются сразу.
+    /// A row for one specific field. Secret values stay masked until they are
+    /// explicitly revealed; ordinary ones are shown right away.
     fn extra_row(
         &self,
         uuid: &str,
@@ -2644,7 +2644,7 @@ impl App {
 
         let mut right: Vec<Element<'_, Message>> = Vec::new();
 
-        // Корзина вложений: сколько лежит и чем очистить.
+        // Attachment trash: how much is in there, and how to clear it.
         if self.trash.files > 0 {
             right.push(
                 iced::widget::text(format!(
@@ -2686,7 +2686,7 @@ impl App {
 
         right.push(iced::widget::Space::new().width(Length::Fill).into());
 
-        // Кнопка закрывает всплывающее уведомление, поэтому без него она бессмысленна.
+        // The button dismisses the toast, so without one it would be pointless.
         if self.toast.is_some() {
             right.push(
                 iced::widget::button(iced::widget::text("Clear").size(11.0).color(TEXT))
@@ -2706,15 +2706,15 @@ impl App {
     }
 }
 
-/// Отбирает индексы записей под поисковую строку и фильтр по типу.
+/// Picks the entry indices that match a search string and a kind filter.
 ///
-/// Папки в список не попадают. Поиск регистронезависим и смотрит в название,
-/// домен и полный адрес. Записи без названия уходят в конец, иначе пять
-/// пустых веб-форм из выгрузки занимали бы весь верх списка.
+/// Folders never make it into the list. The search is case-insensitive and looks at the
+/// title, the domain and the full URL. Entries with no title sink to the bottom, otherwise
+/// the five blank web forms in an export would take over the whole top of the list.
 ///
-/// `folder` — uuid папки; пустая строка означает «все папки и верхний
-/// уровень», а не «только верхний уровень»: так папки работают как фильтр,
-/// а не как единственный способ увидеть запись.
+/// `folder` is a folder uuid; an empty string means "all folders
+/// and the top level", not "top level only": that way folders work
+/// as a filter rather than as the only way to reach an entry.
 fn filter_indices(
     items: &[PifItem],
     query: &str,
@@ -2728,7 +2728,7 @@ fn filter_indices(
         .iter()
         .enumerate()
         .filter(|(_, it)| it.type_name.as_deref() != Some(FOLDER_TYPE))
-        // Корзина — отдельный раздел: в обычном списке удалённых записей нет.
+        // The trash is a separate section: deleted entries are not in the normal list.
         .filter(|(_, it)| it.trashed.unwrap_or(false) == trash)
         .filter(|(_, it)| kind.is_empty() || it.kind() == kind)
         .filter(|(_, it)| folder.is_empty() || it.folder_uuid.as_deref() == Some(folder))
@@ -2739,7 +2739,7 @@ fn filter_indices(
             let hit =
                 |v: &Option<String>| v.as_ref().is_some_and(|s| s.to_lowercase().contains(&q));
             hit(&it.title) || hit(&it.location_key) || hit(&it.location)
-                // Номер карты, код лицензии и прочее — тоже ищется.
+                // Card number, licence key and the rest are searched too.
                 || it
                     .extra_fields()
                     .iter()
@@ -2762,7 +2762,7 @@ fn filter_indices(
     out
 }
 
-/// Заголовок для показа: пустая строка в выгрузке равносильна отсутствию.
+/// The title to display: an empty string in the export is as good as none.
 fn display_title(it: &PifItem) -> String {
     it.title
         .as_deref()
@@ -2772,7 +2772,7 @@ fn display_title(it: &PifItem) -> String {
         .to_string()
 }
 
-/// Поле «ПОДПИСЬ» + содержимое.
+/// A "LABEL" field plus its content.
 fn field<'a>(name: &str, content: Element<'a, Message>) -> Element<'a, Message> {
     iced::widget::column(vec![
         iced::widget::text(name.to_uppercase())
@@ -2785,12 +2785,12 @@ fn field<'a>(name: &str, content: Element<'a, Message>) -> Element<'a, Message> 
     .into()
 }
 
-/// Строка «подпись: значение» с кнопкой копирования.
-/// Кнопка со значком вместо подписи.
+/// A "label: value" row with a copy button: an icon button standing in
+/// for the label.
 ///
-/// Подпись убрана, чтобы рядом со значением не стояло лишнего текста. Имя
-/// действия возвращается подсказкой: без неё значок пришлось бы угадывать, а
-/// у canvas-интерфейса нет другого способа объявить, что кнопка делает.
+/// The label is dropped so that no stray text sits next to the value. The action's
+/// name comes back in a tooltip: without it the icon would have to be guessed at,
+/// and a canvas interface has no other way to announce what a button does.
 fn icon_button<'a>(
     mark: icons::Icon,
     tip: &'a str,
@@ -2809,8 +2809,8 @@ fn icon_button<'a>(
     .into()
 }
 
-/// То же, что [`icon_button`], но крупнее: кнопки тулбара стоят в строке
-/// заголовка и должны читаться наравне с ним.
+/// The same as [`icon_button`] but larger: toolbar buttons sit in the title
+/// row and have to read as its peers.
 #[allow(clippy::too_many_arguments)]
 fn toolbar_icon_button<'a>(
     mark: icons::Icon,
@@ -2818,11 +2818,11 @@ fn toolbar_icon_button<'a>(
     msg: Message,
     style: fn(&Theme, iced::widget::button::Status) -> iced::widget::button::Style,
 ) -> Element<'a, Message> {
-    // Размер задаёт содержимое, а не сама кнопка. У кнопки height()
-    // ограничен лимитами родителя и в строке тулбара отрабатывает как
-    // «не больше, чем дали», поэтому кнопка оставалась в 23 px. Контейнер
-    // внутри задаёт размер напрямую, и кнопка становится ровно такой.
-    // Отступ нулевой, чтобы не прибавлять к высоте лишние пиксели.
+    // The content sets the size, not the button itself. A button's height()
+    // is capped by the parent and in a toolbar row behaves as "no more than
+    // you were given", so the button stayed at 23 px. The inner container
+    // sets the size directly and the button becomes exactly that. The
+    // padding is zero so it adds no extra pixels to the height.
     let button = iced::widget::button(
         iced::widget::container(icons::icon_thin(mark, ICON_BUTTON_SIZE, TEXT))
             .width(Length::Fixed(TOOLBAR_BTN_W))
@@ -2876,15 +2876,15 @@ fn chip_idle(_t: &Theme, s: iced::widget::button::Status) -> iced::widget::butto
     iced::widget::button::Style::default().with_background(bg)
 }
 
-/// Кнопка тулбара. Отступ задан явно: у кнопки по умолчанию он такой, что
-/// значок внутри сжимается и перестаёт читаться наравне с полем поиска.
+/// Toolbar button. The padding is set explicitly: the default is such that the
+/// icon inside gets squeezed and stops reading as a peer of the search field.
 fn chip_toolbar(_t: &Theme, s: iced::widget::button::Status) -> iced::widget::button::Style {
-    // Плашки нет: кнопка показывает тот же градиент, что и полоса. Свой
-    // серый фон выглядел бы вставленным чужеродным прямоугольником.
-    // Под наведением проступает лёгкая подсветка, иначе нажать не на что.
+    // No plate: the button shows the same gradient as the bar. A grey
+    // background of its own would look like a foreign rectangle dropped in.
+    // A faint highlight shows on hover, otherwise there is nothing to press.
     match s {
-        // Подсветка под наведением едва различима: кнопка должна читаться
-        // как нажимаемая, но не выглядеть плашкой поверх градиента.
+        // The hover highlight is barely perceptible: the button has to read
+        // as pressable without looking like a plate laid over the gradient.
         iced::widget::button::Status::Hovered => iced::widget::button::Style::default()
             .with_background(Color::from_rgba(1.0, 1.0, 1.0, 0.07)),
         _ => iced::widget::button::Style::default(),
@@ -2909,7 +2909,7 @@ fn row_active(_t: &Theme, _s: iced::widget::button::Status) -> iced::widget::but
     iced::widget::button::Style::default().with_background(Color::from_rgb(0.15, 0.19, 0.26))
 }
 
-/// Картинка, вписанная в квадрат `side`.
+/// An image fitted into a `side`-sized square.
 fn thumbnail(path: &std::path::Path, side: f32) -> iced::widget::Image {
     iced::widget::image(iced::widget::image::Handle::from_path(path.to_path_buf()))
         .width(Length::Fixed(side))
@@ -2918,12 +2918,12 @@ fn thumbnail(path: &std::path::Path, side: f32) -> iced::widget::Image {
         .filter_method(iced::widget::image::FilterMethod::Linear)
 }
 
-/// Похоже ли содержимое файла на картинку.
+/// Whether a file's contents look like a picture.
 ///
-/// Решение по расширению, а не по содержимому: `iced` сам разбирает формат по
-/// данным, но показывать превью имеет смысл только для заведомо поддерживаемых
-/// расширений. `heic` сюда не входит — `iced` его не декодирует, и вместо
-/// картинки получился бы пустой прямоугольник.
+/// The decision is made by extension rather than by content: `iced` does sniff
+/// the format from the data itself, but a preview only makes sense for
+/// extensions known to be supported. `heic` is not in the list — `iced` cannot
+/// decode it, and you would get an empty rectangle instead of a picture.
 fn is_image(path: &std::path::Path) -> bool {
     let Some(ext) = path
         .extension()
@@ -2937,7 +2937,7 @@ fn is_image(path: &std::path::Path) -> bool {
     )
 }
 
-/// Текст уведомления о прикреплении файлов.
+/// The toast text for attaching files.
 fn attach_toast(added: usize, failed: &[String]) -> String {
     if failed.is_empty() {
         format!("{} attached, remember to save", plural_files(added))
@@ -2952,10 +2952,10 @@ fn attach_toast(added: usize, failed: &[String]) -> String {
     }
 }
 
-/// Тип записи по значению `typeName`, как он приходит из выгрузки.
+/// The item kind for a `typeName` value, as it arrives from the export.
 ///
-/// Неизвестный тип трактуется как логин: это самый безобидный вариант, поле
-/// `designation` у него читается однозначно.
+/// An unknown type is treated as a login: it is the least surprising option,
+/// and its `designation` field reads unambiguously.
 fn item_kind_of(type_name: &Option<String>) -> opclient_core::pif::ItemKind {
     use opclient_core::pif::ItemKind;
 
@@ -2965,11 +2965,11 @@ fn item_kind_of(type_name: &Option<String>) -> opclient_core::pif::ItemKind {
         .unwrap_or(ItemKind::Login)
 }
 
-/// «1 file», «2 files».
+/// "1 file", "2 files".
 ///
-/// По-русски здесь была тройная форма — «файл», «файла», «файлов», — и
-/// приходилось считать по последним цифрам. По-английски различие только
-/// между единицей и всем остальным, поэтому и функция стала короче.
+/// In Russian this needed three separate forms and had to branch on the last
+/// digits. English only draws a line between one and everything else, which
+/// is why the function got shorter too.
 fn plural_files(n: usize) -> String {
     if n == 1 {
         "1 file".to_string()
@@ -3002,16 +3002,16 @@ fn masked(v: &str) -> String {
     format!("{head}{}{tail}", "•".repeat((n - 5).min(20)))
 }
 
-/// Сколько знаков пути помещается в тулбар до поля поиска.
+/// How many path characters fit in the toolbar before the search field.
 ///
-/// Бюджет в знаках, а не в пикселях: `iced` не даёт измерить ширину текста
-/// из `view`, а без ограничения длинное имя файла переносит путь на вторую
-/// строку и ломает высоту полосы.
+/// The budget is in characters, not pixels: `iced` gives no way to measure
+/// text width from `view`, and with no limit a long file name wraps the path
+/// onto a second line and breaks the bar's height.
 const PATH_MAX_CHARS: usize = 46;
 
-/// Обрезает строку по длине, сохраняя начало и конец.
+/// Shortens a string by length while keeping its head and its tail.
 ///
-/// Конец важнее начала: в пути это имя файла, ради которого строку читают.
+/// The tail matters more than the head: in a path it is the file name, the very reason anyone reads the line.
 fn ellipsize(s: &str, max: usize) -> String {
     let n = s.chars().count();
     if n <= max || max < 3 {
@@ -3025,7 +3025,7 @@ fn ellipsize(s: &str, max: usize) -> String {
     out
 }
 
-/// Схлопывает длинный путь до «…/папка/файл».
+/// Collapses a long path down to "…/folder/file".
 fn short_path(p: &std::path::Path) -> String {
     let s = p.to_string_lossy().to_string();
     let parts: Vec<&str> = s.rsplitn(3, '/').collect();
@@ -3036,7 +3036,7 @@ fn short_path(p: &std::path::Path) -> String {
     }
 }
 
-/// Открывает файл связанной программой macOS.
+/// Opens a file with the macOS app associated with it.
 #[cfg(target_os = "macos")]
 fn open_in_finder(path: &std::path::Path) -> bool {
     std::process::Command::new("open").arg(path).spawn().is_ok()
@@ -3047,7 +3047,7 @@ fn open_in_finder(_path: &std::path::Path) -> bool {
     false
 }
 
-/// Строка формы: подпись и поле ввода.
+/// A form row: a label and an input field.
 fn input_row<'a>(name: &'a str, value: &str, key: &'static str) -> Element<'a, Message> {
     let input: Element<'a, Message> = iced::widget::text_input(name, value)
         .on_input(move |v| Message::DraftChanged(key, v.clone()))
@@ -3063,34 +3063,34 @@ fn chip_danger(_t: &Theme, _s: iced::widget::button::Status) -> iced::widget::bu
 const TEXT: Color = Color::from_rgb(0.86, 0.88, 0.92);
 const TEXT_BRIGHT: Color = Color::from_rgb(1.0, 1.0, 1.0);
 const TEXT_DIM: Color = Color::from_rgb(0.48, 0.52, 0.58);
-/// Предупреждение о несохранённых изменениях.
+/// The warning colour for unsaved changes.
 const TEXT_WARN: Color = Color::from_rgb(0.95, 0.72, 0.30);
 
-// Поверхности. Боковая панель и тулбар в macOS 27 выглядят как одна
-// непрерывнаяmaterial-поверхность, разделённая волосяной линией, поэтому
-// фон у них один и тот же — иначе стык сразу бросается в глаза.
+// Surfaces. In macOS 27 the sidebar and the toolbar read as one continuous
+// material surface split by a hairline, so they share the same background —
+// otherwise the seam jumps out at you immediately.
 const SURFACE: Color = Color::from_rgb(0.113, 0.125, 0.149);
-/// Основное поле: чуть светлее, чтобы панели читались как выемки.
+/// The main field: a touch lighter, so the panels read as recesses.
 const SURFACE_RAISED: Color = Color::from_rgb(0.141, 0.156, 0.184);
-/// Волосяная линия между панелью и содержимым.
+/// The hairline between the panel and the content.
 const HAIRLINE: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.07);
 
-/// Левый край полосы заголовка: #4065b9.
+/// Left edge of the title bar: #4065b9.
 const TOOLBAR_LEFT: Color = Color::from_rgb(0.251, 0.396, 0.725);
 
-/// Правый край полосы заголовка: #0d122c.
+/// Right edge of the title bar: #0d122c.
 const TOOLBAR_RIGHT: Color = Color::from_rgb(0.051, 0.071, 0.173);
 
-/// Направление градиента в градусах: 90° — слева направо, 135° — из
-/// левого верхнего угла в правый нижний.
+/// Gradient direction in degrees: 90° is left to right, 135° is from the top
+/// left corner to the bottom right.
 ///
-/// Градиент принимает радианы, поэтому градусы переводятся явно. Раньше
-/// здесь стояло голое число 90, то есть 90 радиан, и направление
-/// получалось случайным.
+/// The gradient takes radians, so the degrees are converted explicitly. This
+/// used to hold a bare 90 — that is, 90 radians — which made the direction
+/// effectively arbitrary.
 const TOOLBAR_GRADIENT_DEG: f32 = 135.0;
 
-/// Фон тулбара: переход от #4065b9 в левом верхнем углу к #0d122c в
-/// правом нижнем.
+/// Toolbar background: a blend from #4065b9 in the top left corner to
+/// #0d122c in the bottom right.
 fn toolbar_background() -> iced::Background {
     iced::Background::Gradient(iced::Gradient::Linear(
         iced::gradient::Linear::new(TOOLBAR_GRADIENT_DEG.to_radians())
@@ -3099,19 +3099,19 @@ fn toolbar_background() -> iced::Background {
     ))
 }
 
-// Кегли. Размеры текста в интерфейсе разбросаны по коду десятками магических
-// чисел; macOS держит шкалу фиксированной, и без неё сходятся только
-// заголовки, а мелкий текст — нет.
+// Type sizes. Text sizes are scattered across the codebase as dozens of
+// magic numbers; macOS keeps a fixed scale, and without it only the
+// headings line up, while the small text does not.
 mod type_scale {
-    /// Заголовок окна и крупные названия.
+    /// Window title and large headings.
     pub const LARGE: f32 = 20.0;
-    /// Заголовок панели.
+    /// Panel heading.
     pub const TITLE: f32 = 15.0;
-    /// Обычный текст строк.
+    /// Ordinary row text.
     pub const BODY: f32 = 13.0;
-    /// Второстепенный текст: счётчики, подписи полей.
+    /// Secondary text: counters, field captions.
     pub const SECONDARY: f32 = 11.0;
-    /// Заголовки секций в боковой панели.
+    /// Section headings in the sidebar.
     pub const CAPTION: f32 = 10.0;
 }
 
@@ -3125,30 +3125,30 @@ fn copy_to_clipboard(text: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// Перетаскивание границы меняет ширину панели списка на смещение
-    /// указателя, а не на его абсолютную координату.
+    /// Dragging the divider resizes the list panel by the pointer's
+    /// delta, not by its absolute position.
     #[test]
-    fn перетаскивание_меняет_ширину_списка() {
+    fn dragging_divider_resizes_list() {
         let mut app = App::blank();
         assert_eq!(app.list_width, LIST_WIDTH_DEFAULT);
 
         let _ = app.update(Message::ResizeStart);
-        // Первое движение только запоминает точку опоры, ширину не трогая.
+        // The first move only records the anchor; the width stays put.
         let _ = app.update(Message::ResizeMove(100.0));
         assert_eq!(app.list_width, LIST_WIDTH_DEFAULT);
 
         let _ = app.update(Message::ResizeMove(160.0));
         assert_eq!(app.list_width, LIST_WIDTH_DEFAULT + 60.0);
 
-        // Движение влево уменьшает, и обратно без рывка.
+        // Moving left shrinks it, and back again without a jerk.
         let _ = app.update(Message::ResizeMove(110.0));
         assert_eq!(app.list_width, LIST_WIDTH_DEFAULT + 10.0);
     }
 
-    /// Ширина не уезжает за пределы: узкий список и зажатая правую панель
-    /// бесполезны обе.
+    /// The width stays within bounds: a list that is too narrow and a
+    /// right panel that is too squeezed are both useless.
     #[test]
-    fn ширина_списка_ограничена() {
+    fn list_width_is_clamped() {
         let mut app = App::blank();
         let _ = app.update(Message::ResizeStart);
         let _ = app.update(Message::ResizeMove(0.0));
@@ -3160,9 +3160,9 @@ mod tests {
         assert_eq!(app.list_width, LIST_WIDTH_MIN);
     }
 
-    /// После отпускания указателя список перестаёт меняться.
+    /// Once the pointer is released the list stops changing.
     #[test]
-    fn после_отпускания_список_не_двигается() {
+    fn releasing_pointer_freezes_list_width() {
         let mut app = App::blank();
         let _ = app.update(Message::ResizeStart);
         let _ = app.update(Message::ResizeMove(100.0));
@@ -3171,13 +3171,13 @@ mod tests {
 
         let _ = app.update(Message::GlobalRelease);
         let _ = app.update(Message::ResizeMove(400.0));
-        assert_eq!(app.list_width, width, "список изменился без перетаскивания");
+        assert_eq!(app.list_width, width, "list width changed without a drag");
     }
 
-    /// У правой панели тоже есть минимум: список нельзя растянуть до
-    /// окна и закрыть всё, ради чего он растягивается.
+    /// The right panel has a minimum too: the list must not be stretched
+    /// to fill the window and hide everything it is stretched to show.
     #[test]
-    fn у_правой_панели_есть_минимум() {
+    fn right_panel_keeps_its_minimum() {
         let mut app = App::blank();
         let _ = app.update(Message::WindowResized(1000.0));
 
@@ -3186,13 +3186,13 @@ mod tests {
         let _ = app.update(Message::ResizeMove(5000.0));
 
         let panel3 = 1000.0 - SIDEBAR_W - 1.0 - RESIZE_HANDLE_W - app.list_width;
-        assert_eq!(panel3, PANEL3_MIN, "правая панель схлопнулась");
-        assert!(app.list_width < 1000.0, "список занял всё окно");
+        assert_eq!(panel3, PANEL3_MIN, "right panel collapsed");
+        assert!(app.list_width < 1000.0, "list took over the whole window");
     }
 
-    /// Узкое окно не должно ломать расчёт: минимумы просто сталкиваются.
+    /// A narrow window must not break the calculation: minimums just meet.
     #[test]
-    fn узкое_окно_не_ломает_ширину() {
+    fn narrow_window_keeps_width_math_valid() {
         let mut app = App::blank();
         let _ = app.update(Message::WindowResized(200.0));
 
@@ -3201,7 +3201,7 @@ mod tests {
         let _ = app.update(Message::ResizeMove(9999.0));
 
         assert_eq!(app.list_width, LIST_WIDTH_MIN);
-        assert!(app.list_width.is_finite(), "ширина стала не числом");
+        assert!(app.list_width.is_finite(), "width stopped being a finite number");
     }
 
     fn item(title: &str, kind: &str, key: Option<&str>) -> PifItem {
@@ -3226,7 +3226,7 @@ mod tests {
     }
 
     #[test]
-    fn поиск_по_названию_и_домену_регистронезависим() {
+    fn search_by_title_and_domain_is_case_insensitive() {
         let items = vec![
             item("GitHub", "webforms.WebForm", Some("github.com")),
             item("Банк", "webforms.WebForm", Some("sberbank.ru")),
@@ -3238,7 +3238,7 @@ mod tests {
     }
 
     #[test]
-    fn фильтр_по_типу_работает() {
+    fn filter_by_kind_works() {
         let items = vec![
             item("A", "webforms.WebForm", None),
             item("B", "securenotes.SecureNote", None),
@@ -3253,7 +3253,7 @@ mod tests {
     }
 
     #[test]
-    fn папки_не_попадают_в_список() {
+    fn folders_are_excluded_from_list() {
         let items = vec![
             item("Личное", FOLDER_TYPE, None),
             item("Запись", "webforms.WebForm", None),
@@ -3262,7 +3262,7 @@ mod tests {
     }
 
     #[test]
-    fn пустые_заголовки_уходят_в_конец() {
+    fn empty_titles_sort_to_the_end() {
         let items = vec![
             item("", "webforms.WebForm", None),
             item("", "webforms.WebForm", None),
@@ -3273,12 +3273,12 @@ mod tests {
     }
 
     #[test]
-    fn маска_пароля_не_выдаёт_середину() {
-        // 16 символов: 3 первых + 11 точек (16-5) + 2 последних
+    fn password_mask_hides_the_middle() {
+        // 16 chars: first 3 + 11 dots (16-5) + last 2
         assert_eq!(masked("gu3SecretValue99"), "gu3•••••••••••99");
         assert_eq!(masked("abc"), "•••");
         assert_eq!(masked(""), "");
-        // длинный пароль не превращается в простыню точек
+        // a long password must not become a sheet of dots
         assert_eq!(
             masked(&"x".repeat(100))
                 .chars()
@@ -3289,7 +3289,7 @@ mod tests {
     }
 
     #[test]
-    fn путь_схлопывается() {
+    fn long_path_is_elided() {
         assert_eq!(
             short_path(std::path::Path::new(
                 "/Users/x/Downloads/1Password (5).1pif/data.1pif"
@@ -3299,11 +3299,11 @@ mod tests {
     }
 
     #[test]
-    fn без_файла_список_пуст() {
+    fn without_a_file_the_list_is_empty() {
         let app = App::blank();
         assert!(app.vault.is_none());
         assert!(app.entries.is_empty());
-        // Категории берутся из хранилища: без файла их быть не должно.
+        // Categories come from the vault: with no file there must be none.
         assert!(app.kind_counts().is_empty());
     }
 }
@@ -3318,7 +3318,7 @@ mod wallet_view_tests {
     }
 
     #[test]
-    fn карта_находится_по_номеру() {
+    fn card_is_found_by_number() {
         let items = vec![card()];
         assert_eq!(filter_indices(&items, "5314451", "", false, ""), vec![0]);
         assert_eq!(filter_indices(&items, "карта", "", false, ""), vec![0]);
@@ -3326,7 +3326,7 @@ mod wallet_view_tests {
     }
 
     #[test]
-    fn карта_фильтруется_по_типу() {
+    fn card_is_filtered_by_kind() {
         let items = vec![card()];
         assert_eq!(
             filter_indices(&items, "", "Credit Cards", false, ""),
@@ -3340,33 +3340,33 @@ mod wallet_view_tests {
 mod render_tests {
     use super::*;
 
-    /// Приложение с одним файлом во временном каталоге.
+    /// An app holding a single file in a temp directory.
     fn app_with(name: &str, contents: &str) -> (App, PathBuf) {
         let path = std::env::temp_dir().join(format!("opclient-render-{name}.1pif"));
         std::fs::write(&path, contents).unwrap();
         let mut app = App::blank();
-        assert!(app.open(path.clone()), "файл должен открыться");
+        assert!(app.open(path.clone()), "the file should open");
         (app, path)
     }
 
-    /// Извлечение закрывает хранилище и чистит всё, что к нему относилось.
+    /// Ejecting closes the vault and clears everything that belonged to it.
     #[test]
-    fn извлечение_закрывает_хранилище() {
+    fn ejecting_closes_the_vault() {
         let (mut app, path) = app_with("eject", "{\"uuid\":\"U1\",\"typeName\":\"webforms.WebForm\",\"title\":\"Demo\",\"secureContents\":{}}");
         assert!(app.vault.is_some());
 
         let _ = app.update(Message::EjectVault);
 
-        assert!(app.vault.is_none(), "хранилище осталось открытым");
-        assert!(app.path.is_none(), "путь остался в состоянии");
-        assert!(app.entries.is_empty(), "список остался непустым");
+        assert!(app.vault.is_none(), "the vault stayed open");
+        assert!(app.path.is_none(), "the path stayed in the state");
+        assert!(app.entries.is_empty(), "the list stayed non-empty");
         let _ = std::fs::remove_file(path);
     }
 
-    /// С несохранёнными правками извлечение не проходит: они живут в
-    /// памяти и потерялись бы молча.
+    /// With unsaved edits ejecting is refused: they live in memory and
+    /// would be lost silently.
     #[test]
-    fn извлечение_не_теряет_правки() {
+    fn ejecting_refuses_to_discard_edits() {
         let (mut app, path) = app_with("eject-dirty", "{\"uuid\":\"U1\",\"typeName\":\"webforms.WebForm\",\"title\":\"Demo\",\"secureContents\":{}}");
         app.vault.as_mut().unwrap().items[0].dirty = true;
         assert!(app.has_changes());
@@ -3375,7 +3375,7 @@ mod render_tests {
 
         assert!(
             app.vault.is_some(),
-            "хранилище закрылось несмотря на правки"
+            "the vault closed despite the edits"
         );
         let _ = std::fs::remove_file(path);
     }
@@ -3383,9 +3383,9 @@ mod render_tests {
     const CARD: &str = r#"{"uuid":"C1","typeName":"wallet.financial.CreditCard","title":"Кредитная карта","secureContents":{"cardholder":"Vitalii","ccnum":"5314451117033352","cvv":"712","expiry_mm":"9","expiry_yy":"2016"}}
 {"uuid":"W1","typeName":"webforms.WebForm","title":"Website","secureContents":{"fields":[{"name":"username","type":"T","designation":"username","value":"me"},{"name":"password","type":"P","designation":"password","value":"pw"}]}}"#;
 
-    /// Вид карты должен собираться: раньше эти данные вообще не читались.
+    /// The card view must build: this data used to be unread entirely.
     #[test]
-    fn вид_карты_собирается() {
+    fn card_view_builds() {
         let (app, path) = app_with("card-view", CARD);
         let it = app
             .vault
@@ -3401,21 +3401,21 @@ mod render_tests {
         let _ = std::fs::remove_file(path);
     }
 
-    /// Вид всей страницы на данных кошелька тоже должен собираться.
+    /// The whole-page view must build on wallet data too.
     #[test]
-    fn страница_собирается() {
+    fn page_view_builds() {
         let (app, path) = app_with("page", CARD);
         let _element = app.view();
         let _ = std::fs::remove_file(path);
     }
 
-    /// После открытия нового файла раскрытые пароли не должны сохраняться.
+    /// Opening a new file must not carry over revealed passwords.
     #[test]
-    fn открытие_нового_файла_сбрасывает_раскрытое() {
+    fn opening_a_new_file_resets_revealed() {
         let (mut app, path) = app_with("reset", CARD);
         app.revealed.insert("C1::Пароль".into(), true);
         assert!(app.open(path.clone()));
-        assert!(app.revealed.is_empty(), "раскрытые пароли надо сбросить");
+        assert!(app.revealed.is_empty(), "revealed passwords must be reset");
         let _ = std::fs::remove_file(path);
     }
 }
@@ -3424,8 +3424,8 @@ mod render_tests {
 mod tests_common {
     use std::path::PathBuf;
 
-    /// Каталог, уникальный для каждого вызова в этом процессе.
-    /// pid у параллельных тестов общий, поэтому нужен счётчик.
+    /// A directory unique to each call within this process.
+    /// The pid is shared by parallel tests, so a counter is needed.
     pub fn unique_dir(prefix: &str) -> PathBuf {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static N: AtomicUsize = AtomicUsize::new(0);
@@ -3439,7 +3439,7 @@ mod attachment_view_tests {
     use super::tests_common::*;
     use super::*;
 
-    /// Экспорт с одним вложением рядом с data.1pif.
+    /// An export with a single attachment next to data.1pif.
     fn export_with_attachment() -> PathBuf {
         let root = unique_dir("opclient-ui-att");
         let _ = std::fs::remove_dir_all(&root);
@@ -3457,7 +3457,7 @@ mod attachment_view_tests {
     }
 
     #[test]
-    fn вложение_находится_для_записи() {
+    fn attachment_is_found_for_item() {
         let path = export_with_attachment();
         let mut app = App::blank();
         assert!(app.open(path.clone()));
@@ -3469,7 +3469,7 @@ mod attachment_view_tests {
         assert_eq!(files[0].name, "invoice.pdf");
         assert!(files[0].path.exists());
 
-        // вид записи с вложением должен собираться
+        // the item view with an attachment must build
         let it = app.vault.as_ref().unwrap().items[0].clone();
         let _element = app.view_details(&it);
 
@@ -3477,7 +3477,7 @@ mod attachment_view_tests {
     }
 
     #[test]
-    fn у_записи_без_вложений_пусто() {
+    fn item_without_attachments_has_none() {
         let path = export_with_attachment();
         let mut app = App::blank();
         app.open(path.clone());
@@ -3491,7 +3491,7 @@ mod editing_tests {
     use super::tests_common::*;
     use super::*;
 
-    /// Приложение с копией настоящего экспорта (либо с заглушкой).
+    /// An app with a copy of the real export (or with a stub).
     fn app_with_export(tag: &str) -> (App, PathBuf) {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../golden")
@@ -3510,14 +3510,14 @@ mod editing_tests {
         (app, root)
     }
 
-    /// Заглушка на случай, когда настоящего экспорта нет.
+    /// A stub for when the real export is missing.
     ///
-    /// Записей здесь ровно столько, сколько нужно тестам: они выбирают
-    /// вторую и третью, а на одной записи выбор был пустым и `unwrap()` на
-    /// `None` ронял три теста. Раньше это было незаметно — рядом лежал
-    /// настоящий экспорт на 533 записи, он и подставлялся вместо заглушки.
-    /// Но он лежит вне репозитория и в CI его нет, так что падение вылезло
-    /// только на чистой машине.
+    /// It holds exactly as many items as the tests need: they pick the
+    /// second and third, and with a single item the selection came up empty
+    /// and `unwrap()` on `None` took down three tests. That used to go
+    /// unnoticed — a real 533-item export sat right there and got substituted
+    /// for the stub instead. But it lives outside the repo and is missing in
+    /// CI, so the failure only surfaced on a clean machine.
     const STUB_EXPORT: &str = concat!(
         r#"{"uuid":"U1","typeName":"securenotes.SecureNote","title":"A","secureContents":{}}"#,
         "\n",
@@ -3528,12 +3528,12 @@ mod editing_tests {
     );
 
     #[test]
-    fn новая_запись_создаётся_и_сохраняется() {
+    fn new_item_is_created_and_saved() {
         let (mut app, root) = app_with_export("create");
         let before = app.vault.as_ref().unwrap().items.len();
 
         let _ = app.update(Message::StartCreate);
-        assert!(app.editing.is_some(), "форма должна открыться");
+        assert!(app.editing.is_some(), "the form should open");
         let _ = app.update(Message::DraftChanged("title", "Новый вход".into()));
         let _ = app.update(Message::DraftChanged("username", "user@example.com".into()));
         let _ = app.update(Message::DraftChanged("password", "pass-1234".into()));
@@ -3543,19 +3543,19 @@ mod editing_tests {
         ));
         let _ = app.update(Message::ApplyEdit);
 
-        assert!(app.editing.is_none(), "форма должна закрыться");
-        assert!(app.has_changes(), "появились несохранённые изменения");
+        assert!(app.editing.is_none(), "the form should close");
+        assert!(app.has_changes(), "unsaved changes appeared");
         assert_eq!(app.vault.as_ref().unwrap().items.len(), before + 1);
 
         let _ = app.update(Message::SaveFile);
-        assert!(!app.has_changes(), "после сохранения правок не остаётся");
+        assert!(!app.has_changes(), "no edits remain after saving");
 
         let again = Pif::from_file(root.join("data.1pif")).unwrap();
         let created = again
             .items
             .iter()
             .find(|i| i.title.as_deref() == Some("Новый вход"))
-            .expect("запись должна пережить сохранение");
+            .expect("the item should survive the save");
         assert_eq!(created.primary_password(), Some("pass-1234"));
         assert_eq!(created.usernames(), vec!["user@example.com"]);
 
@@ -3563,7 +3563,7 @@ mod editing_tests {
     }
 
     #[test]
-    fn правка_существующей_записи() {
+    fn editing_an_existing_item() {
         let (mut app, root) = app_with_export("edit");
         let _ = app.update(Message::Select(1));
         let uuid = app.selected_item().unwrap().uuid.clone();
@@ -3577,14 +3577,14 @@ mod editing_tests {
         let _ = app.update(Message::SaveFile);
 
         let again = Pif::from_file(root.join("data.1pif")).unwrap();
-        let it = again.find(&uuid).expect("запись должна остаться");
+        let it = again.find(&uuid).expect("the item should still be there");
         assert_eq!(it.primary_password(), Some("совсем-другой"));
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn отмена_правки_ничего_не_меняет() {
+    fn cancelling_an_edit_changes_nothing() {
         let (mut app, root) = app_with_export("cancel");
         let _ = app.update(Message::Select(2));
         let uuid = app.selected_item().unwrap().uuid.clone();
@@ -3605,7 +3605,7 @@ mod editing_tests {
         let _ = app.update(Message::CancelEdit);
 
         assert!(app.editing.is_none());
-        assert!(!app.has_changes(), "отмена не должна оставлять изменений");
+        assert!(!app.has_changes(), "cancelling should leave no changes");
         assert_eq!(
             app.vault
                 .as_ref()
@@ -3621,7 +3621,7 @@ mod editing_tests {
     }
 
     #[test]
-    fn удаление_требует_подтверждения() {
+    fn deleting_requires_confirmation() {
         let (mut app, root) = app_with_export("delete");
         let _ = app.update(Message::Select(1));
         let uuid = app.selected_item().unwrap().uuid.clone();
@@ -3632,7 +3632,7 @@ mod editing_tests {
         let _ = app.update(Message::ConfirmDelete(false));
         assert!(
             !app.editing.as_ref().unwrap().confirm_delete,
-            "отмена снимает вопрос"
+            "cancelling clears the prompt"
         );
         assert!(app.vault.as_ref().unwrap().find(&uuid).is_some());
 
@@ -3642,14 +3642,14 @@ mod editing_tests {
         let _ = app.update(Message::ApplyEdit);
         assert!(
             app.vault.as_ref().unwrap().find(&uuid).is_none(),
-            "после подтверждения запись должна исчезнуть"
+            "after confirming, the item should be gone"
         );
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn форма_и_страница_собираются() {
+    fn editor_and_page_views_build() {
         let (app, root) = app_with_export("render");
         let mut app = app;
         let _ = app.update(Message::Select(0));
@@ -3668,9 +3668,9 @@ mod editing_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Кнопка сохранения появляется только при несохранённых правках.
+    /// The save button only shows up when there are unsaved edits.
     #[test]
-    fn кнопка_сохранения_появляется_по_необходимости() {
+    fn save_button_appears_only_when_needed() {
         let (mut app, root) = app_with_export("button");
         assert!(!app.has_changes());
         let _ = app.update(Message::StartCreate);
@@ -3682,7 +3682,7 @@ mod editing_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Экспорт с записями разных видов, одной удалённой и папкой.
+    /// An export with items of several kinds, one trashed item, and a folder.
     fn app_with_kinds(tag: &str) -> (App, PathBuf) {
         let root = unique_dir(tag);
         std::fs::create_dir_all(&root).unwrap();
@@ -3710,31 +3710,31 @@ mod editing_tests {
         (app, root)
     }
 
-    /// Счётчики категорий считают только живые записи и не папки.
+    /// Category counters count only live items, never folders.
     #[test]
-    fn счётчики_категорий_считают_живое() {
+    fn category_counts_ignore_folders_and_trashed() {
         let (app, root) = app_with_kinds("sidebar-counts");
 
         let counts = app.kind_counts();
         let web = counts.iter().find(|(k, _)| k == "Logins").map(|(_, c)| *c);
-        assert_eq!(web, Some(2), "две живые веб-формы");
+        assert_eq!(web, Some(2), "two live web forms");
 
         assert!(
             !counts.iter().any(|(k, _)| k == "Folder"),
-            "папки в категориях быть не должно"
+            "folders should not appear in categories"
         );
         assert_eq!(
             counts.iter().map(|(_, c)| c).sum::<usize>(),
             3,
-            "удалённая запись в счётчики не попадает"
+            "a trashed item should not be counted"
         );
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Корзина — взаимоисключающий раздел с категориями.
+    /// The trash is a section that excludes the kind categories.
     #[test]
-    fn корзина_снимает_фильтр_по_виду() {
+    fn trash_clears_the_kind_filter() {
         let (mut app, root) = app_with_kinds("sidebar-trash");
 
         let _ = app.update(Message::Filter("Logins".into()));
@@ -3744,15 +3744,15 @@ mod editing_tests {
         assert!(app.show_trash);
         assert!(
             app.kind_filter.is_empty(),
-            "в корзине показываются записи всех видов сразу"
+            "the trash shows items of every kind at once"
         );
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Возврат из корзины тоже снимает фильтр.
+    /// Leaving the trash clears the filter too.
     #[test]
-    fn возврат_из_корзины_снимает_фильтр() {
+    fn leaving_trash_clears_the_kind_filter() {
         let (mut app, root) = app_with_kinds("sidebar-back");
 
         let _ = app.update(Message::ShowTrash(true));
@@ -3763,39 +3763,39 @@ mod editing_tests {
         assert!(app.kind_filter.is_empty());
         assert!(
             !app.entries.is_empty(),
-            "после возврата список снова наполнен"
+            "the list is populated again after coming back"
         );
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Категории сходятся по алфавиту и повторный щелчок снимает фильтр.
+    /// Categories come out alphabetically, and a second click clears the filter.
     #[test]
-    fn категории_упорядочены_и_переключаются() {
+    fn categories_are_sorted_and_toggle() {
         let (mut app, root) = app_with_kinds("sidebar-order");
 
         let kinds: Vec<String> = app.kind_counts().into_iter().map(|(k, _)| k).collect();
         let mut sorted = kinds.clone();
         sorted.sort();
-        assert_eq!(kinds, sorted, "категории идут по алфавиту");
+        assert_eq!(kinds, sorted, "categories are in alphabetical order");
 
         let first = kinds.first().cloned().unwrap();
         let _ = app.update(Message::Filter(first.clone()));
         assert_eq!(app.kind_filter, first);
-        assert!(!app.entries.is_empty(), "категория что-то показывает");
+        assert!(!app.entries.is_empty(), "the category shows something");
 
         let _ = app.update(Message::Filter(first));
         assert!(
             app.kind_filter.is_empty(),
-            "повторный щелчок снимает фильтр"
+            "a second click clears the filter"
         );
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Боковая панель и список с разделителями собираются.
+    /// The sidebar and the list with their separators build.
     #[test]
-    fn панель_и_разделители_собираются() {
+    fn sidebar_and_list_build() {
         let (mut app, root) = app_with_kinds("sidebar-render");
         let _ = app.view_sidebar();
         let _ = app.view_list();
@@ -3806,9 +3806,9 @@ mod editing_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Созданное хранилище сразу становится текущим и пустым.
+    /// A newly created vault becomes current and empty right away.
     #[test]
-    fn новое_хранилище_открывается_пустым() {
+    fn new_vault_opens_empty() {
         let dir = unique_dir("create-ui");
         let vault = Pif::create(&dir).unwrap();
 
@@ -3817,17 +3817,17 @@ mod editing_tests {
 
         assert!(app.error.is_none());
         assert_eq!(app.path, Some(dir.join("data.1pif")));
-        assert!(app.entries.is_empty(), "список пока пуст");
-        assert!(app.kind_counts().is_empty(), "категорий пока нет");
-        assert!(!app.show_trash, "корзина закрыта");
-        assert!(app.kind_filter.is_empty(), "фильтр сброшен");
+        assert!(app.entries.is_empty(), "the list is still empty");
+        assert!(app.kind_counts().is_empty(), "there are no categories yet");
+        assert!(!app.show_trash, "the trash is off");
+        assert!(app.kind_filter.is_empty(), "the filter is cleared");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// В новом хранилище можно создать запись и сохранить её на диск.
+    /// In a fresh vault you can create an item and save it to disk.
     #[test]
-    fn в_новом_хранилище_создаётся_запись() {
+    fn item_can_be_created_in_a_new_vault() {
         let dir = unique_dir("create-record");
         let vault = Pif::create(&dir).unwrap();
 
@@ -3841,11 +3841,11 @@ mod editing_tests {
         let _ = app.update(Message::DraftChanged("password", "pass".into()));
         let _ = app.update(Message::ApplyEdit);
 
-        assert_eq!(app.entries.len(), 1, "запись появилась в списке");
-        assert!(app.has_changes(), "есть что сохранять");
+        assert_eq!(app.entries.len(), 1, "the item showed up in the list");
+        assert!(app.has_changes(), "there is something to save");
 
         let _ = app.update(Message::SaveFile);
-        assert!(!app.has_changes(), "после сохранения всё чисто");
+        assert!(!app.has_changes(), "everything is clean after saving");
 
         let reread = Pif::from_file(dir.join("data.1pif")).unwrap();
         assert_eq!(
@@ -3855,19 +3855,19 @@ mod editing_tests {
                 .filter(|i| i.title.as_deref() == Some("Первый вход"))
                 .count(),
             1,
-            "запись пережила сохранение и переоткрытие"
+            "the item survived the save and reopen"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Стартовый экран и тулбар предлагают создать хранилище.
+    /// The start screen and the toolbar both offer to create a vault.
     #[test]
-    fn создание_доступно_с_обоих_экранов() {
+    fn creation_is_available_from_both_screens() {
         let mut app = App::blank();
         let _ = app.view();
 
-        // С файлом открытым тулбар тоже предлагает создать новое хранилище.
+        // With a file open the toolbar offers a new vault too.
         let dir = unique_dir("create-toolbar");
         let vault = Pif::create(&dir).unwrap();
         app.open_created(&dir, vault);
@@ -3876,7 +3876,7 @@ mod editing_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Экспорт с двумя папками: в одной лежит запись, в другой нет.
+    /// An export with two folders: one holds an item, the other does not.
     fn app_with_folders(tag: &str) -> (App, PathBuf) {
         let root = unique_dir(tag);
         std::fs::create_dir_all(&root).unwrap();
@@ -3894,9 +3894,9 @@ mod editing_tests {
         (app, root)
     }
 
-    /// Папки видны в боковой панели со своими счётчиками.
+    /// Folders show in the sidebar with their own counters.
     #[test]
-    fn папки_показываются_со_счётчиками() {
+    fn folders_show_with_counts() {
         let (app, root) = app_with_folders("folders-panel");
 
         assert_eq!(app.folder_filter, "");
@@ -3909,51 +3909,51 @@ mod editing_tests {
             .iter()
             .map(|f| app.vault.as_ref().unwrap().folder_count(&f.uuid))
             .collect();
-        assert_eq!(counts, vec![1, 0], "в Work одна запись, в EMails пусто");
+        assert_eq!(counts, vec![1, 0], "Work has one item, EMails is empty");
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Выбор папки фильтрует список, повторный щелчок снимает фильтр.
+    /// Picking a folder filters the list; a second click clears the filter.
     #[test]
-    fn выбор_папки_фильтрует_список() {
+    fn picking_a_folder_filters_the_list() {
         let (mut app, root) = app_with_folders("folders-filter");
-        assert_eq!(app.entries.len(), 2, "изначально обе записи");
+        assert_eq!(app.entries.len(), 2, "both items to start with");
 
         let _ = app.update(Message::PickFolder("F1".into()));
         assert_eq!(app.folder_filter, "F1");
-        assert_eq!(app.entries.len(), 1, "в папке только GitHub");
+        assert_eq!(app.entries.len(), 1, "the folder holds only GitHub");
 
         let _ = app.update(Message::PickFolder("F1".into()));
-        assert_eq!(app.folder_filter, "", "повторный щелчок снимает");
+        assert_eq!(app.folder_filter, "", "a second click clears it");
         assert_eq!(app.entries.len(), 2);
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Новая папка создаётся из поля ввода и сразу становится активной.
+    /// A new folder is created from the input field and becomes active at once.
     #[test]
-    fn папка_создаётся_из_поля_ввода() {
+    fn folder_is_created_from_the_draft_field() {
         let (mut app, root) = app_with_folders("folders-create");
 
         let _ = app.update(Message::FolderDraftChanged("  Home  ".into()));
         let _ = app.update(Message::SubmitFolderDraft);
 
         let folders = app.vault.as_ref().unwrap().folders();
-        assert_eq!(folders.len(), 3, "папка добавилась");
+        assert_eq!(folders.len(), 3, "the folder was added");
         assert!(
             folders.iter().any(|f| f.title.as_deref() == Some("Home")),
-            "название обрезано от пробелов"
+            "the name was trimmed of spaces"
         );
-        assert!(!app.folder_filter.is_empty(), "новая папка выбрана");
-        assert!(app.folder_draft.is_empty(), "поле очищено");
+        assert!(!app.folder_filter.is_empty(), "the new folder is selected");
+        assert!(app.folder_draft.is_empty(), "the field was cleared");
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Пустое название папки не создаёт её.
+    /// An empty folder name does not create one.
     #[test]
-    fn пустое_название_папки_отклоняется() {
+    fn empty_folder_name_is_rejected() {
         let (mut app, root) = app_with_folders("folders-empty");
 
         let _ = app.update(Message::FolderDraftChanged("   ".into()));
@@ -3963,19 +3963,19 @@ mod editing_tests {
         let (text, _) = app.toast.clone().unwrap();
         assert!(
             text.contains("name"),
-            "пользователю сказано, в чём дело: {text}"
+            "the user is told what went wrong: {text}"
         );
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Выбранная папка подставляется в поле ввода, и переименование работает.
+    /// The picked folder is filled into the input field, and renaming works.
     #[test]
-    fn папка_переименовывается() {
+    fn folder_can_be_renamed() {
         let (mut app, root) = app_with_folders("folders-rename");
 
         let _ = app.update(Message::PickFolder("F2".into()));
-        assert_eq!(app.folder_draft, "EMails", "поле показало название папки");
+        assert_eq!(app.folder_draft, "EMails", "the field showed the folder name");
         assert_eq!(app.folder_draft_for.as_deref(), Some("F2"));
 
         let _ = app.update(Message::FolderDraftChanged("Mail".into()));
@@ -3983,40 +3983,40 @@ mod editing_tests {
 
         let renamed = app.vault.as_ref().unwrap().folder("F2").unwrap();
         assert_eq!(renamed.title.as_deref(), Some("Mail"));
-        // Папка остаётся выбранной и списка отфильтрованной: после
-        // переименования обычно хотят убедиться, что всё на месте.
+        // The folder stays selected and the list stays filtered: after a
+        // rename you normally want to confirm everything is in place.
         assert_eq!(app.folder_draft_for.as_deref(), Some("F2"));
         assert_eq!(app.folder_filter, "F2");
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Удаление папки спрашивает подтверждение и не уносит её содержимое.
+    /// Deleting a folder asks first and does not take its contents with it.
     #[test]
-    fn удаление_папки_спрашивает_и_сохраняет_записи() {
+    fn deleting_a_folder_asks_and_keeps_items() {
         let (mut app, root) = app_with_folders("folders-delete");
 
         let _ = app.update(Message::PickFolder("F1".into()));
         let _ = app.update(Message::AskDeleteFolder("F1".into()));
         assert!(
             app.vault.as_ref().unwrap().folder("F1").is_some(),
-            "первое нажатие только спрашивает"
+            "the first press only asks"
         );
 
         let _ = app.update(Message::AskDeleteFolder("F1".into()));
         assert!(
             app.vault.as_ref().unwrap().folder("F1").is_none(),
-            "второе удаляет"
+            "the second deletes"
         );
-        assert_eq!(app.folder_filter, "", "удалённая папка снимает фильтр");
-        assert_eq!(app.entries.len(), 2, "записи остались на месте");
+        assert_eq!(app.folder_filter, "", "the deleted folder clears the filter");
+        assert_eq!(app.entries.len(), 2, "the items are still there");
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Новая запись, созданная из папки, попадает в неё.
+    /// A new item created from the folder lands inside it.
     #[test]
-    fn новая_запись_попадает_в_открытую_папку() {
+    fn new_item_lands_in_the_open_folder() {
         let (mut app, root) = app_with_folders("folders-new-item");
 
         let _ = app.update(Message::PickFolder("F1".into()));
@@ -4032,17 +4032,17 @@ mod editing_tests {
             .iter()
             .filter(|i| i.folder_uuid.as_deref() == Some("F1"))
             .count();
-        assert_eq!(in_folder, 2, "GitHub и новая запись в папке Work");
+        assert_eq!(in_folder, 2, "GitHub and the new item are in the Work folder");
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Папка выбирается и в редакторе существующей записи.
+    /// The folder can also be chosen in the existing-item editor.
     #[test]
-    fn папка_меняется_в_редакторе() {
+    fn folder_can_be_changed_in_the_editor() {
         let (mut app, root) = app_with_folders("folders-editor");
 
-        // U2 лежит без папки; выберем его и положим в Work.
+        // U2 sits in no folder; pick it and put it into Work.
         let pos = app
             .entries
             .iter()
@@ -4062,10 +4062,10 @@ mod editing_tests {
                 .folder_uuid
                 .as_deref(),
             Some("F1"),
-            "папка записалась в запись"
+            "the folder was written onto the item"
         );
 
-        // И обратно на верхний уровень.
+        // And back to the top level.
         let _ = app.update(Message::Select(pos));
         let _ = app.update(Message::StartEdit);
         let _ = app.update(Message::DraftFolder(None));
@@ -4084,15 +4084,15 @@ mod scenario_tests {
     use super::tests_common::*;
     use super::*;
 
-    /// Сценарий на копии настоящего экспорта: правка, создание, удаление,
-    /// сохранение, откат из бэкапа.
+    /// An end-to-end scenario on a copy of the real export: edit, create,
+    /// delete, save, and roll back from the backup.
     #[test]
-    fn полный_сценарий_на_настоящем_экспорте() {
+    fn full_scenario_on_the_real_export() {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../golden")
             .join("1Password 2026-10-13, 03_54 PM (533 items and 2 folders).1pif/data.1pif");
         if !src.exists() {
-            eprintln!("реальный экспорт не найден");
+            eprintln!("real export not found");
             return;
         }
         let root = unique_dir("opclient-scenario");
@@ -4105,7 +4105,7 @@ mod scenario_tests {
         assert!(app.open(file.clone()));
         let count = app.vault.as_ref().unwrap().items.len();
 
-        // 1. правка существующей записи
+        // 1. edit an existing item
         let target = app.vault.as_ref().unwrap().items[10].uuid.clone();
         let _ = app.update(Message::Select(10));
         let _ = app.update(Message::StartEdit);
@@ -4115,7 +4115,7 @@ mod scenario_tests {
         ));
         let _ = app.update(Message::ApplyEdit);
 
-        // 2. создание новой
+        // 2. create a new one
         let _ = app.update(Message::StartCreate);
         let _ = app.update(Message::DraftChanged("title", "Проверка сценария".into()));
         let _ = app.update(Message::DraftChanged("username", "scen@example.com".into()));
@@ -4126,57 +4126,57 @@ mod scenario_tests {
         ));
         let _ = app.update(Message::ApplyEdit);
 
-        // 3. удаление: сначала выбираем запись, потом жмём «Удалить»
+        // 3. delete: pick the item first, then hit "Delete"
         let victim = app.vault.as_ref().unwrap().items[20].uuid.clone();
         assert!(
             app.select_uuid(&victim),
-            "запись должна быть видна в списке"
+            "the item should be visible in the list"
         );
         let _ = app.update(Message::DeleteItem);
-        // вопрос должен появиться в открытой форме
+        // the prompt should appear in the open form
         assert!(
             app.editing.as_ref().is_some_and(|e| e.confirm_delete),
-            "удаление обязано спрашивать подтверждение"
+            "deleting must ask for confirmation"
         );
         let _ = app.update(Message::ConfirmDelete(true));
-        assert!(app.editing.is_none(), "после удаления форма закрывается");
+        assert!(app.editing.is_none(), "the form closes after the delete");
 
         assert!(app.has_changes());
         let _ = app.update(Message::SaveFile);
         assert!(!app.has_changes());
 
-        // 4. файл валиден и изменения на месте
+        // 4. the file parses and the changes are in place
         let after = Pif::from_file(&file).unwrap();
         assert_eq!(
             after.items.len(),
             count,
-            "создание и удаление должны уравняться"
+            "the create and the delete should cancel out"
         );
         assert!(after.find(&target).is_some());
         assert!(
             after.find(&victim).is_none(),
-            "удалённая запись не должна вернуться"
+            "the deleted item should not come back"
         );
         let created = after
             .items
             .iter()
             .find(|i| i.title.as_deref() == Some("Проверка сценария"))
-            .expect("новая запись обязана сохраниться");
+            .expect("the new item must be saved");
         assert_eq!(created.primary_password(), Some("pass-9999"));
         assert_eq!(created.usernames(), vec!["scen@example.com"]);
 
-        // 5. бэкап — это исходный файл
+        // 5. the backup is the original file
         let bak = std::fs::read(backup_of(&file)).unwrap();
-        assert_eq!(bak, before, "бэкап должен содержать исходное содержимое");
+        assert_eq!(bak, before, "the backup should hold the original contents");
 
-        // 6. откат: вернуть бэкап и убедиться, что всё как было
+        // 6. roll back: restore the backup and confirm everything is as before
         std::fs::write(&file, &bak).unwrap();
         let restored = Pif::from_file(&file).unwrap();
         assert_eq!(restored.items.len(), count);
         assert!(restored.find(&target).is_some());
         assert!(
             restored.find(&victim).is_some(),
-            "после отката запись должна вернуться"
+            "after the rollback the item should come back"
         );
         assert!(!restored.has_changes());
 
@@ -4217,9 +4217,9 @@ mod notes_and_focus_tests {
         (app, root)
     }
 
-    /// Заметки с переносами должны попадать в форму и обратно в файл.
+    /// Notes with embedded newlines must reach the form and go back into the file.
     #[test]
-    fn заметки_с_переносами_правятся() {
+    fn multiline_notes_round_trip_through_save() {
         let original = "первая строка\nвторая строка\nтретья";
         let (mut app, root) = editor_with_notes("notes", original);
 
@@ -4228,12 +4228,12 @@ mod notes_and_focus_tests {
         assert_eq!(
             app.editing.as_ref().unwrap().notes,
             original,
-            "форма должна показать заметки как есть"
+            "the form must show the notes verbatim"
         );
 
         let changed = "новая первая\nновая вторая";
-        // Пользователь стёр текст и набрал новый: сначала выделяем всё,
-        // потом вставляем. Так работает реальное редактирование.
+        // The user wiped the text and typed a new one: select everything first,
+        // then paste. That is how real editing behaves.
         let _ = app.update(Message::EditNotes(text_editor::Action::SelectAll));
         let _ = app.update(Message::EditNotes(text_editor::Action::Edit(
             text_editor::Edit::Paste(std::sync::Arc::new(changed.to_string())),
@@ -4244,20 +4244,20 @@ mod notes_and_focus_tests {
 
         let again = Pif::from_file(root.join("data.1pif")).unwrap();
         let it = again.find(&uuid).unwrap();
-        assert_eq!(it.notes(), Some(changed), "переносы обязаны сохраниться");
+        assert_eq!(it.notes(), Some(changed), "line breaks must survive the save");
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Документ редактора и черновик не должны расходиться.
+    /// The editor document and the draft must never drift apart.
     #[test]
-    fn документ_и_черновик_совпадают() {
+    fn document_and_draft_stay_in_sync() {
         let (mut app, root) = editor_with_notes("sync", "исходный текст");
         let _ = app.update(Message::StartEdit);
         let e = app.editing.as_ref().unwrap();
         assert_eq!(e.notes, e.notes_doc.text());
 
-        // Пустое действие не должно ничего портить.
+        // A no-op action must not corrupt anything.
         let _ = app.update(Message::EditNotes(text_editor::Action::Move(
             text_editor::Motion::End,
         )));
@@ -4268,9 +4268,9 @@ mod notes_and_focus_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Форма собирается вместе с многострочным редактором.
+    /// The form builds together with the multiline editor.
     #[test]
-    fn форма_с_редактором_собирается() {
+    fn form_with_editor_renders() {
         let (mut app, root) = editor_with_notes("render", "текст");
         let _ = app.update(Message::StartEdit);
         let _ = app.view_editor();
@@ -4278,9 +4278,9 @@ mod notes_and_focus_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Подписка на клавиатуру должна существовать и не падать.
+    /// The keyboard subscription must exist without panicking.
     #[test]
-    fn подписка_клавиатуры_строится() {
+    fn keyboard_subscription_builds() {
         let app = App::blank();
         let _ = app.subscription();
     }
@@ -4309,9 +4309,9 @@ mod trash_ui_tests {
         (app, root)
     }
 
-    /// Обычный список не показывает удалённые записи.
+    /// The regular list never shows trashed entries.
     #[test]
-    fn из_обычного_списка_корзина_скрыта() {
+    fn regular_list_hides_trashed_entries() {
         let (app, root) = export_with_trashed("trash-hidden");
         assert!(!app.show_trash);
         let titles: Vec<String> = app
@@ -4323,9 +4323,9 @@ mod trash_ui_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Раздел «Корзина» показывает только удалённые.
+    /// The Trash section shows only trashed entries.
     #[test]
-    fn в_корзине_только_удалённые() {
+    fn trash_section_lists_only_trashed() {
         let (mut app, root) = export_with_trashed("trash-only");
         let _ = app.update(Message::ShowTrash(!app.show_trash));
         assert!(app.show_trash);
@@ -4334,9 +4334,9 @@ mod trash_ui_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Переключение корзины туда-обратно возвращает обычный список.
+    /// Toggling trash on and off restores the regular list.
     #[test]
-    fn переключение_корзины_туда_обратно() {
+    fn toggling_trash_round_trip_restores_list() {
         let (mut app, root) = export_with_trashed("trash-toggle");
         let normal = app.entries.len();
         let _ = app.update(Message::ShowTrash(!app.show_trash));
@@ -4346,31 +4346,31 @@ mod trash_ui_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Очистка пустой корзины вложений безвредна.
+    /// Emptying an already empty attachment trash is harmless.
     #[test]
-    fn очистка_пустой_корзины_безвредна() {
+    fn emptying_empty_trash_is_harmless() {
         let (mut app, root) = export_with_trashed("trash-empty-ui");
         assert_eq!(app.trash.files, 0);
         let _ = app.update(Message::EmptyTrash);
         assert_eq!(app.trash.files, 0);
-        assert!(app.toast.is_some(), "должно быть уведомление");
+        assert!(app.toast.is_some(), "a toast should be shown");
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Склонение считается по-русски.
+    /// Plurals are computed with Russian rules.
     #[test]
-    fn склонение_файлов() {
+    fn file_plural_forms() {
         assert_eq!(plural_files(0), "0 files");
         assert_eq!(plural_files(1), "1 file");
         assert_eq!(plural_files(2), "2 files");
-        // По-английски 21 и 102 — это просто «files», без склонения.
+        // In English 21 and 102 are just "files", no plural distinction.
         assert_eq!(plural_files(21), "21 files");
         assert_eq!(plural_files(102), "102 files");
     }
 
-    /// Счётчики в интерфейсе совпадают с разобранными данными.
+    /// The UI counters must match the parsed data.
     #[test]
-    fn счётчики_корзины_из_данных() {
+    fn trash_counters_match_parsed_data() {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../golden")
             .join("1Password 2026-10-13, 03_54 PM (533 items and 2 folders).1pif/data.1pif");
@@ -4383,12 +4383,12 @@ mod trash_ui_tests {
         assert_eq!(
             alive + trashed,
             533,
-            "живые плюс удалённые должны дать все записи"
+            "alive plus trashed must account for every record"
         );
-        assert_eq!(trashed, 57, "в выгрузке помечено 57 удалённых записей");
+        assert_eq!(trashed, 57, "the export marks 57 trashed records");
         assert_eq!(
             alive, 476,
-            "столько же показывает 1Password в разделе All Items"
+            "1Password's All Items view shows the same number"
         );
     }
 }
@@ -4398,7 +4398,7 @@ mod trash_confirm_tests {
     use super::tests_common::*;
     use super::*;
 
-    /// Приложение с непустой корзиной вложений.
+    /// An app with a non-empty attachment trash.
     fn app_with_trash(tag: &str) -> (App, PathBuf) {
         let root = unique_dir(tag);
         std::fs::create_dir_all(root.join("attachments").join("U1")).unwrap();
@@ -4410,7 +4410,7 @@ mod trash_confirm_tests {
         .unwrap();
         let mut app = App::blank();
         assert!(app.open(root.join("data.1pif")));
-        // Кладём файл в корзину, как это сделало бы удаление записи.
+        // Queue the file for the trash the way removing an entry would.
         let src = std::env::temp_dir().join(format!("{tag}-src.jpg"));
         std::fs::write(&src, b"jpeg2").unwrap();
         let uuid = app.vault.as_ref().unwrap().items[0].uuid.clone();
@@ -4427,32 +4427,32 @@ mod trash_confirm_tests {
         (app, root)
     }
 
-    /// Очистка не происходит с первого нажатия.
+    /// Emptying must not happen on the first press.
     #[test]
-    fn первое_нажатие_только_спрашивает() {
+    fn first_press_only_asks() {
         let (mut app, root) = app_with_trash("trash-ask");
         assert_eq!(app.trash.files, 1);
         let _ = app.update(Message::EmptyTrash);
-        assert!(app.trash_armed, "после первого нажатия ждём подтверждения");
-        assert_eq!(app.trash.files, 1, "корзина должна остаться на месте");
+        assert!(app.trash_armed, "after the first press we wait for confirmation");
+        assert_eq!(app.trash.files, 1, "the trash must stay intact");
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Второе нажатие очищает.
+    /// The second press empties.
     #[test]
-    fn второе_нажатие_очищает() {
+    fn second_press_empties() {
         let (mut app, root) = app_with_trash("trash-do");
         let _ = app.update(Message::EmptyTrash);
         let _ = app.update(Message::EmptyTrash);
-        assert_eq!(app.trash.files, 0, "корзина должна быть очищена");
+        assert_eq!(app.trash.files, 0, "the trash must be emptied");
         assert!(!app.trash_armed);
-        assert!(!root.join("trash").exists(), "каталог корзины убран");
+        assert!(!root.join("trash").exists(), "the trash directory is gone");
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Отмена снимает вопрос.
+    /// Cancelling clears the question.
     #[test]
-    fn отмена_снимает_вопрос() {
+    fn cancel_clears_the_prompt() {
         let (mut app, root) = app_with_trash("trash-cancel");
         let _ = app.update(Message::EmptyTrash);
         assert!(app.trash_armed);
@@ -4460,13 +4460,13 @@ mod trash_confirm_tests {
         assert!(!app.trash_armed);
         assert_eq!(app.trash.files, 1);
         let _ = app.update(Message::EmptyTrash);
-        assert!(app.trash_armed, "вопрос должен задаваться заново");
+        assert!(app.trash_armed, "the prompt must be asked again");
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Переключение раздела снимает вопрос, чтобы он не «завис».
+    /// Switching sections clears the prompt so it cannot get "stuck".
     #[test]
-    fn переключение_раздела_снимает_вопрос() {
+    fn switching_sections_clears_the_prompt() {
         let (mut app, root) = app_with_trash("trash-switch");
         let _ = app.update(Message::EmptyTrash);
         let _ = app.update(Message::ShowTrash(!app.show_trash));
@@ -4474,9 +4474,9 @@ mod trash_confirm_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Панель собирается и в вооружённом состоянии.
+    /// The panel builds in the armed state too.
     #[test]
-    fn панель_собирается_с_подтверждением() {
+    fn panel_renders_while_armed() {
         let (mut app, root) = app_with_trash("trash-render");
         let _ = app.view();
         let _ = app.update(Message::EmptyTrash);
@@ -4484,29 +4484,29 @@ mod trash_confirm_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Версия в панели «О приложении» и в Info.plist обязана совпадать
-    /// Версия приходит из тега git, а не из константы, но всё равно должна
-    /// быть похожа на версию. Раньше здесь стояло сравнение с
-    /// `CARGO_PKG_VERSION`, и оно пропустило расхождение 1.0.0 против
-    /// тега v1.5.0: обе величины были настоящими, просто разными.
+    /// The About panel and Info.plist must agree on the version.
+    /// The version comes from a git tag rather than a constant, but it still
+    /// has to look like a version. There used to be a comparison against
+    /// `CARGO_PKG_VERSION` here, and it let a 1.0.0 vs v1.5.0 mismatch
+    /// through: both values were genuine, just different.
     #[test]
-    fn версия_похожа_на_версию() {
+    fn version_looks_like_a_version() {
         let parts: Vec<&str> = APP_VERSION.split('.').collect();
         assert_eq!(
             parts.len(),
             3,
-            "ожидается вид X.Y.Z, получено {APP_VERSION:?}"
+            "expected X.Y.Z, got {APP_VERSION:?}"
         );
         for part in parts {
             assert!(
                 !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()),
-                "часть версии должна быть числом: {part:?} в {APP_VERSION:?}"
+                "version part must be numeric: {part:?} in {APP_VERSION:?}"
             );
         }
-        assert!(APP_VERSION.starts_with('1'), "версия 1.x");
+        assert!(APP_VERSION.starts_with('1'), "version 1.x");
     }
 
-    /// Приложение с одной живой записью и без вложений.
+    /// An app with one live entry and no attachments.
     fn app_with_one_entry(tag: &str) -> (App, PathBuf, PathBuf) {
         let root = unique_dir(tag);
         std::fs::create_dir_all(&root).unwrap();
@@ -4527,53 +4527,53 @@ mod trash_confirm_tests {
         (app, root, source)
     }
 
-    /// Файл появляется в каталоге записи только после сохранения.
+    /// The file lands in the entry's directory only after a save.
     #[test]
-    fn прикреплённый_файл_попадает_на_диск_при_save() {
+    fn attached_file_lands_on_disk_on_save() {
         let (mut app, root, source) = app_with_one_entry("attach-save");
         let uuid = app.vault.as_ref().unwrap().items[0].uuid.clone();
 
         let (added, failed) = app.attach_paths(&uuid, std::slice::from_ref(&source));
-        assert_eq!(added, 1, "файл должен прикрепиться");
-        assert!(failed.is_empty(), "ошибок быть не должно: {failed:?}");
+        assert_eq!(added, 1, "the file should attach");
+        assert!(failed.is_empty(), "there should be no failures: {failed:?}");
 
-        // До сохранения каталога вложений на диске нет.
-        assert!(!root.join("attachments").exists(), "нечего копировать");
+        // Before the save there is no attachments directory on disk.
+        assert!(!root.join("attachments").exists(), "there is nothing to copy yet");
 
         let _ = app.update(Message::SaveFile);
 
         let copied = root.join("attachments").join(&uuid).join("источник.jpg");
-        assert!(copied.exists(), "файл должен лежать в attachments/<uuid>/");
+        assert!(copied.exists(), "the file should live in attachments/<uuid>/");
         assert_eq!(std::fs::read(&copied).unwrap(), b"jpeg-bytes");
-        assert!(!app.attachments_pending(), "после сохранения ждать нечего");
+        assert!(!app.attachments_pending(), "nothing is pending after the save");
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Открепление требует второго нажатия.
+    /// Detaching requires a second press.
     #[test]
-    fn открепление_требует_подтверждения() {
+    fn detaching_requires_confirmation() {
         let (mut app, root, source) = app_with_one_entry("detach-two-step");
         let uuid = app.vault.as_ref().unwrap().items[0].uuid.clone();
         app.attach_paths(&uuid, std::slice::from_ref(&source));
         let _ = app.update(Message::SaveFile);
 
-        // Первое нажатие только вооружает кнопку.
+        // The first press only arms the button.
         let _ = app.update(Message::DetachAttachment("источник.jpg".into()));
         assert_eq!(app.detach_armed.as_deref(), Some("источник.jpg"));
         assert_eq!(
             app.vault.as_ref().unwrap().attachments_of(&uuid).len(),
             1,
-            "файл не должен исчезнуть после первого нажатия"
+            "the file must not vanish after the first press"
         );
 
-        // Второе — открепляет.
+        // The second one detaches.
         let _ = app.update(Message::DetachAttachment("источник.jpg".into()));
-        assert!(app.detach_armed.is_none(), "вооружение снимается");
+        assert!(app.detach_armed.is_none(), "arming is cleared");
         assert!(app.vault.as_ref().unwrap().attachments_of(&uuid).is_empty());
-        assert!(app.attachments_pending(), "файл ждёт корзины");
+        assert!(app.attachments_pending(), "the file is awaiting the trash");
 
-        // До сохранения файл на диске ещё лежит.
+        // Until the save, the file is still on disk.
         assert!(root
             .join("attachments")
             .join(&uuid)
@@ -4587,15 +4587,15 @@ mod trash_confirm_tests {
                 .join(&uuid)
                 .join("источник.jpg")
                 .exists(),
-            "после сохранения файл должен уйти в корзину"
+            "after the save the file must go to the trash"
         );
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Отмена вооружения ничего не удаляет.
+    /// Cancelling the arming deletes nothing.
     #[test]
-    fn отмена_открепления_ничего_не_делает() {
+    fn cancelling_detach_does_nothing() {
         let (mut app, root, source) = app_with_one_entry("detach-cancel");
         let uuid = app.vault.as_ref().unwrap().items[0].uuid.clone();
         app.attach_paths(&uuid, std::slice::from_ref(&source));
@@ -4609,10 +4609,10 @@ mod trash_confirm_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Уход на другую запись сбрасывает вооружение: подтверждение относилось
-    /// к файлу в прежнем контексте.
+    /// Moving to another entry resets the arming: the confirmation belonged
+    /// to the file in the previous context.
     #[test]
-    fn выбор_другой_записи_снимает_вооружение() {
+    fn selecting_another_entry_clears_arming() {
         let (mut app, root, source) = app_with_one_entry("detach-select");
         let uuid = app.vault.as_ref().unwrap().items[0].uuid.clone();
         app.attach_paths(&uuid, std::slice::from_ref(&source));
@@ -4624,35 +4624,35 @@ mod trash_confirm_tests {
         let _ = app.update(Message::Select(0));
         assert!(
             app.detach_armed.is_none(),
-            "вооружение не должно пережить смену записи"
+            "arming must not survive an entry change"
         );
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// У новой записи нет uuid, поэтому прикреплять пока некуда.
+    /// A new entry has no uuid yet, so there is nowhere to attach to.
     #[test]
-    fn новая_запись_не_принимает_вложения() {
+    fn new_entry_rejects_attachments() {
         let (mut app, root, _source) = app_with_one_entry("attach-new");
         app.editing = Some(Editing::create());
         assert!(
             app.attachment_target().is_none(),
-            "у создаваемой записи нет uuid"
+            "the entry being created has no uuid"
         );
 
         let _ = app.update(Message::AttachFile);
         let (text, _) = app.toast.clone().unwrap();
         assert!(
             text.contains("save the item"),
-            "пользователю нужно объяснить, а не молчать: {text}"
+            "the user needs an explanation, not silence: {text}"
         );
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Одноимённые файлы не затирают друг друга.
+    /// Same-named files must not clobber each other.
     #[test]
-    fn одноимённые_вложения_не_затираются() {
+    fn same_named_attachments_do_not_clobber() {
         let (mut app, root, source) = app_with_one_entry("attach-dupe");
         let uuid = app.vault.as_ref().unwrap().items[0].uuid.clone();
 
@@ -4673,20 +4673,20 @@ mod trash_confirm_tests {
             .iter()
             .map(|a| a.name.clone())
             .collect();
-        assert_eq!(names.len(), 2, "оба файла на месте");
-        assert_ne!(names[0], names[1], "имена должны различаться");
+        assert_eq!(names.len(), 2, "both files are present");
+        assert_ne!(names[0], names[1], "the names must differ");
 
         let _ = app.update(Message::SaveFile);
         let dir = root.join("attachments").join(&uuid);
         let on_disk = std::fs::read_dir(&dir).unwrap().count();
-        assert_eq!(on_disk, 2, "на диске тоже два разных файла");
+        assert_eq!(on_disk, 2, "two distinct files on disk too");
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Текст уведомления не должен вручить пользователю пустоту.
+    /// The toast text must not hand the user nothing at all.
     #[test]
-    fn тексты_уведомлений_про_вложения_осмысленны() {
+    fn attachment_toast_texts_are_meaningful() {
         assert!(attach_toast(0, &[]).contains("0"));
         assert!(attach_toast(1, &[]).contains("file"));
         assert!(attach_toast(3, &[]).contains("files"));
@@ -4694,15 +4694,15 @@ mod trash_confirm_tests {
         assert!(attach_toast(1, &["b.jpg".into()]).contains("b.jpg"));
     }
 
-    /// Показываем только те расширения, которые `iced` действительно умеет.
+    /// We only offer extensions `iced` can really decode.
     #[test]
-    fn картинки_опознаются_по_расширению() {
+    fn images_are_recognized_by_extension() {
         for name in [
             "a.jpg", "a.JPEG", "a.png", "a.gif", "a.bmp", "a.webp", "a.tiff",
         ] {
             assert!(
                 is_image(std::path::Path::new(name)),
-                "{name} должен считаться картинкой"
+                "{name} should be treated as an image"
             );
         }
         for name in [
@@ -4715,14 +4715,14 @@ mod trash_confirm_tests {
         ] {
             assert!(
                 !is_image(std::path::Path::new(name)),
-                "{name} не должен считаться картинкой"
+                "{name} should not be treated as an image"
             );
         }
     }
 
-    /// Повтор по тому же файлу сворачивает превью.
+    /// Repeating the same file collapses the preview.
     #[test]
-    fn превью_переключается() {
+    fn preview_toggles() {
         let (mut app, root, _source) = app_with_one_entry("preview-toggle");
         let path = root.join("avatar.png");
 
@@ -4730,19 +4730,19 @@ mod trash_confirm_tests {
         assert_eq!(
             app.preview.as_ref(),
             Some(&path),
-            "первое нажатие разворачивает"
+            "the first press expands it"
         );
 
         let _ = app.update(Message::TogglePreview(path));
-        assert!(app.preview.is_none(), "второе нажатие сворачивает");
+        assert!(app.preview.is_none(), "the second press collapses it");
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Уход на другую запись закрывает превью: показывать файл чужой записи
-    /// после переключения незачем.
+    /// Moving to another entry closes the preview: there is no point showing
+    /// another entry's file after the switch.
     #[test]
-    fn смена_записи_закрывает_превью() {
+    fn changing_entry_closes_preview() {
         let (mut app, root, _source) = app_with_one_entry("preview-select");
         let _ = app.update(Message::Select(0));
         let _ = app.update(Message::TogglePreview(root.join("avatar.png")));
@@ -4751,15 +4751,15 @@ mod trash_confirm_tests {
         let _ = app.update(Message::Select(0));
         assert!(
             app.preview.is_none(),
-            "смена записи должна закрывать превью"
+            "changing the entry must close the preview"
         );
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Панель записи собирается вместе с превью.
+    /// The entry panel builds with the preview in place.
     #[test]
-    fn панель_собирается_с_превью() {
+    fn panel_renders_with_preview() {
         let (mut app, root, _source) = app_with_one_entry("preview-render");
         let _ = app.update(Message::Select(0));
         let _ = app.update(Message::TogglePreview(root.join("avatar.png")));
@@ -4768,7 +4768,7 @@ mod trash_confirm_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Хранилище с одной пустой записью-заготовкой.
+    /// A vault holding a single empty draft entry.
     fn app_with_one_login(tag: &str) -> (App, PathBuf) {
         let root = unique_dir(tag);
         std::fs::create_dir_all(&root).unwrap();
@@ -4779,9 +4779,9 @@ mod trash_confirm_tests {
         (app, root)
     }
 
-    /// Новая запись создаётся того типа, который выбран в редакторе.
+    /// A new entry is created as the kind chosen in the editor.
     #[test]
-    fn тип_новой_записи_выбирается_и_применяется() {
+    fn new_entry_kind_is_selected_and_applied() {
         use opclient_core::pif::ItemKind;
 
         let (mut app, root) = app_with_one_login("kind-pick");
@@ -4805,12 +4805,12 @@ mod trash_confirm_tests {
             .items
             .iter()
             .find(|i| i.title.as_deref() == Some("Карта"))
-            .expect("запись создана");
+            .expect("entry was created");
 
         assert_eq!(
             created.type_name.as_deref(),
             Some(ItemKind::CreditCard.type_name()),
-            "тип записи взят из редактора"
+            "the entry kind comes from the editor"
         );
 
         let sc = created.secure_contents.as_ref().unwrap();
@@ -4831,10 +4831,10 @@ mod trash_confirm_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Тип у уже существующей записи не меняется: он привязан к структуре,
-    /// которая уже записана в файл.
+    /// The kind of an existing entry never changes: it is bound to the
+    /// structure already written into the file.
     #[test]
-    fn тип_существующей_записи_не_меняется() {
+    fn existing_entry_kind_does_not_change() {
         use opclient_core::pif::ItemKind;
 
         let (mut app, root) = app_with_one_login("kind-existing");
@@ -4851,15 +4851,15 @@ mod trash_confirm_tests {
         assert_eq!(
             app.editing.as_ref().unwrap().kind,
             ItemKind::Server,
-            "тип записи, уже лежащей в файле, трогать нельзя"
+            "the kind of an entry already in the file must not be touched"
         );
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Заметка создаётся без логина и пароля и читается обратно.
+    /// A note is created without a login and password and reads back.
     #[test]
-    fn заметка_создаётся_и_читается() {
+    fn secure_note_is_created_and_read_back() {
         use opclient_core::pif::ItemKind;
 
         let (mut app, root) = app_with_one_login("kind-note");
@@ -4878,7 +4878,7 @@ mod trash_confirm_tests {
             .items
             .iter()
             .find(|i| i.title.as_deref() == Some("Коды восстановления"))
-            .expect("заметка создана");
+            .expect("note was created");
         assert_eq!(
             item.type_name.as_deref(),
             Some(ItemKind::SecureNote.type_name())

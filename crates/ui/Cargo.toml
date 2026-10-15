@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Интерфейс клиента экспорта 1Password (iced)"
+description = "Front end of the 1Password export client (iced)"
 
 [dependencies]
 opclient-core.workspace = true
@@ -15,15 +15,16 @@ iced_futures = "0.14"
 rfd = { version = "0.15", default-features = false }
 async-channel = "2"
 muda = "0.19.3"
-# Буфер обмена. Кроссплатформенный, но раньше стоял под macOS, и на Windows
-# копирование молча не работало.
+# Clipboard. Cross-platform, but it used to sit behind macOS, so copying
+# silently did nothing on Windows.
 arboard = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 
 [build-dependencies]
-# Иконка и версия внутри .exe на Windows. Кроссплатформенная, но собирает
-# ресурсы только под windows, поэтому и в зависимостях сборки, а не в рантайме.
+# Icon and version inside the .exe on Windows. Cross-platform, but it only
+# builds resources under windows, hence a build dependency rather than a
+# runtime one.
 winresource = "0.1"
 
 [[bin]]

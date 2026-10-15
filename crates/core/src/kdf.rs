@@ -1,13 +1,13 @@
-//! Примитивы KDF, подтверждённые дизасмблом.
+//! KDF primitives confirmed by the disassembly.
 //!
-//! Здесь только то, что восстановлено построчно. Функция
-//! `derive_master_key` намеренно **не реализована**: соль для PBKDF2
-//! неизвестна (см. [`crate::keys`]), и любая догадка здесь была бы
-//! вредной — она молча давала бы неверные ключи.
+//! Only what was recovered line by line. `derive_master_key` is
+//! deliberately **not implemented**: the PBKDF2 salt is unknown (see
+//! [`crate::keys`]), and any guess here would be harmful — it would
+//! silently yield wrong keys.
 
 use crate::error::{Error, Result};
 
-/// SHA-256 через обёртку `sha2`.
+/// SHA-256 via the `sha2` wrapper.
 pub fn sha256(data: &[u8]) -> [u8; 32] {
     use sha2::Digest;
     let mut h = sha2::Sha256::new();
@@ -18,14 +18,14 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     r
 }
 
-/// Base64url без padding — как `ag_base64URLencode` со снятием `=`.
+/// Base64url without padding — like `ag_base64URLencode` with `=` stripped.
 pub fn base64url_nopad(data: &[u8]) -> String {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
     URL_SAFE_NO_PAD.encode(data)
 }
 
-/// Base64url с padding — как `ag_base64URLdecode` на входе.
+/// Base64url with padding — matching what `ag_base64URLdecode` takes.
 pub fn base64url_decode(s: &str) -> Result<Vec<u8>> {
     use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
     use base64::Engine;
@@ -35,41 +35,42 @@ pub fn base64url_decode(s: &str) -> Result<Vec<u8>> {
         .map_err(|e| Error::Crypto(format!("base64url: {e}")))
 }
 
-/// `B5PasswordNormalize`, восстановленный из `_B5PasswordNormalize` (0x2af7b).
+/// `B5PasswordNormalize`, recovered from `_B5PasswordNormalize` (0x2af7b).
 ///
-/// В дизасмеле: `CFStringNormalize(kCFStringNormalizationFormNFC)` затем
-/// `CFStringTrimWhitespace`. Для ASCII это identity + trim.
+/// In the disassembly: `CFStringNormalize(kCFStringNormalizationFormNFC)`
+/// followed by `CFStringTrimWhitespace`. For ASCII that is identity + trim.
 ///
-/// Rust-эквивалент Unicode NFC без зависимости на ICU: для ASCII-паролей
-/// (подавляющее большинство) результат идентичен. Для не-ASCII —
-/// см. [`normalize_nfc`], который честно отказывает, а не молчит.
+/// The Rust stand-in for Unicode NFC without an ICU dependency: for ASCII
+/// passwords (the overwhelming majority) the result is identical. For
+/// non-ASCII, see [`normalize_nfc`], which honestly refuses rather than
+/// staying silent.
 pub fn b5_password_normalize(password: &str) -> Result<String> {
     normalize_nfc(password.trim_matches(|c: char| c.is_whitespace()))
 }
 
-/// NFC-нормализация.
+/// NFC normalization.
 ///
-/// Возвращает ошибку, если строка не ASCII: полная NFC требует таблиц
-/// Unicode, а молчаливая подмена сломала бы KDF незаметно.
+/// Returns an error if the string is not ASCII: full NFC needs Unicode
+/// tables, and silently substituting something would break the KDF unnoticed.
 pub fn normalize_nfc(s: &str) -> Result<String> {
     if s.is_ascii() {
         Ok(s.to_string())
     } else {
         Err(Error::Crypto(
-            "NFC-нормализация не-ASCII строки не реализована: \
-             требуется таблица Unicode. Для ASCII результат точен."
+            "NFC normalization of a non-ASCII string is not implemented: \
+             a Unicode table is required. For ASCII the result is exact."
                 .into(),
         ))
     }
 }
 
-/// Промежуточное значение `combined` для PBKDF2.
+/// Intermediate `combined` value for PBKDF2.
 ///
-/// Возвращает строку, но **не** выполняет PBKDF2: соль неизвестна.
+/// Returns the string but does **not** run PBKDF2: the salt is unknown.
 ///
-/// # Ошибка
+/// # Errors
 ///
-/// Если строка не ASCII.
+/// If the string is not ASCII.
 pub fn combined_pbes2_password(email: &str, password: &str) -> Result<String> {
     let prehash = crate::keys::b5_password_prehash(password)?;
     let email_lc = email
@@ -78,41 +79,41 @@ pub fn combined_pbes2_password(email: &str, password: &str) -> Result<String> {
     Ok(format!("{email_lc}:{prehash}"))
 }
 
-/// Статус восстановления KDF.
+/// KDF recovery status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KdfStatus {
-    /// Полностью восстановлен, можно выводить ключ.
+    /// Fully recovered, the key can be derived.
     Complete,
-    /// Частично: известна форма, неизвестна соль.
+    /// Partial: the shape is known, the salt is not.
     BlockedOnSalt,
-    /// Не начато.
+    /// Not started.
     Unknown,
 }
 
 impl KdfStatus {
-    /// Пояснение для пользователя.
+    /// Explanation for the user.
     pub fn reason(self) -> &'static str {
         match self {
             Self::Complete => "KDF recovered",
             Self::BlockedOnSalt => {
-                "Форма KDF восстановлена из дизассемблера, но соль для PBKDF2 \
-                 берётся из encryptedSymmetricKey (<uuid>-scramble в plist), \
-                 который сам зашифрован. Из бэкапа .1p4 соль недоступна: \
-                 в таблице profiles её нет."
+                "The KDF shape was recovered from the disassembler, but the PBKDF2 \
+                 salt is taken from encryptedSymmetricKey (<uuid>-scramble in the plist), \
+                 which is itself encrypted. The salt is unavailable from a .1p4 backup: \
+                 the profiles table does not contain it."
             }
             Self::Unknown => "KDF not parsed",
         }
     }
 }
 
-/// Текущий статус: соль неизвестна.
+/// Current status: the salt is unknown.
 pub const STATUS: KdfStatus = KdfStatus::BlockedOnSalt;
 
-/// Попытка вывести мастер-ключ. Всегда завершается ошибкой,
-/// пока не решена проблема соли — см. [`STATUS`].
+/// Attempt to derive the master key. Always fails,
+/// until the salt problem is solved — see [`STATUS`].
 ///
-/// Ошибка возвращается **до** любых вычислений, чтобы нельзя было
-/// случайно получить «какой-то» ключ и записать его в файл.
+/// The error is returned **before** any computation, so that nobody can
+/// accidentally end up with "some" key and write it to the file.
 pub fn derive_master_key(_password: &str, _inputs: &crate::keys::KdfInputs) -> Result<[u8; 32]> {
     Err(Error::KeyUnavailable(STATUS.reason().to_string()))
 }
@@ -123,17 +124,17 @@ mod tests {
 
     #[test]
     fn prehash_matches_known_vector() {
-        // Вектор из прогона probe_kdf.py: пароль "123xv334188!"
+        // Vector from the probe_kdf.py run: password "123xv334188!"
         let p = crate::keys::b5_password_prehash("123xv334188!").unwrap();
         assert_eq!(
             p, "sd0ZuWup2kfjKO13bFnwPrhy0KKRCrj7ZuxRLxKxZEM",
-            "prehash должен совпадать с эталоном из Python-пробы"
+            "prehash must match the reference from the Python probe"
         );
     }
 
     #[test]
     fn prehash_of_empty_is_constant() {
-        // SHA256("") в base64url без padding
+        // SHA256("") in base64url without padding
         assert_eq!(
             crate::keys::b5_password_prehash("").unwrap(),
             "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU"

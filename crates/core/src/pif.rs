@@ -1,249 +1,249 @@
-//! Чтение формата 1PIF — экспорта 1Password с уже расшифрованным содержимым.
+//! Reading the 1PIF format — a 1Password export whose contents are already decrypted.
 //!
-//! Формат: JSON Lines, а не единый JSON-объект. Между записями встречаются
-//! служебные строки вида `***<uuid>***`, ссылающиеся на вложения.
-//! Устаревший формат (1Password 3/4) — это единый JSON-объект с полем
-//! `items`; парсер принимает оба варианта.
+//! The format is JSON Lines, not one JSON object. Service strings of the form
+//! `***<uuid>***` appear between records and point at attachments.
+//! The legacy format (1Password 3/4) is a single JSON object with an
+//! `items` field; the parser accepts both.
 //!
-//! ## Важно о происхождении данных
+//! ## Where this data comes from
 //!
-//! 1PIF получается только через экспорт из 1Password, то есть это снимок,
-//! а не живой vault. Приложение на этом формате — это клиент экспорта,
-//! а не менеджер, подключённый к хранилищу.
+//! 1PIF only ever comes out of a 1Password export, so it is a snapshot,
+//! not a live vault. An app built on this format is an export client,
+//! not a manager wired to a vault.
 //!
-//! ## Приватность
+//! ## Privacy
 //!
-//! Секретные значения (поля типа `P` — пароль, `C` — флажок с секретом,
-//! а также `otpauth`) хранятся в памяти в открытом виде, как и в исходном
-//! файле. Модуль не логирует их и не пишет на диск.
+//! Secret values (`P` fields — passwords, `C` fields — a secret checkbox,
+//! plus `otpauth`) sit in memory in plaintext, exactly as in the source
+//! file. This module neither logs nor writes them to disk.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// Тип поля по коду 1Password.
+/// Field type, by 1Password's code.
 pub const FIELD_PASSWORD: &str = "P";
-/// Флажок с секретом (скрытое значение).
+/// A checkbox holding a secret (a concealed value).
 pub const FIELD_SECRET_CHECKBOX: &str = "C";
 
-/// Одна запись экспорта.
+/// One exported record.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PifItem {
-    /// Идентификатор записи.
+    /// Record identifier.
     pub uuid: String,
-    /// Тип: `webforms.WebForm`, `passwords.Password`, `securenotes.SecureNote`, …
+    /// Type: `webforms.WebForm`, `passwords.Password`, `securenotes.SecureNote`, …
     #[serde(rename = "typeName")]
     pub type_name: Option<String>,
-    /// Заголовок (открытый текст в 1PIF).
+    /// Title (plain text in 1PIF).
     pub title: Option<String>,
-    /// Домен без схемы.
+    /// Domain without the scheme.
     #[serde(rename = "locationKey")]
     pub location_key: Option<String>,
-    /// Полный URL.
+    /// Full URL.
     pub location: Option<String>,
-    /// Содержимое с расшифрованными полями.
+    /// Contents with decrypted fields.
     #[serde(rename = "secureContents")]
     pub secure_contents: Option<SecureContents>,
-    /// Хеш содержимого (hex, 6–8 символов).
+    /// Content hash (hex, 6–8 chars).
     #[serde(rename = "contentsHash")]
     pub contents_hash: Option<String>,
-    /// Уровень защиты: `SL5`.
+    /// Security level: `SL5`.
     #[serde(rename = "securityLevel")]
     pub security_level: Option<String>,
-    /// Время создания, Unix.
+    /// Creation time, Unix.
     #[serde(rename = "createdAt")]
     pub created_at: Option<i64>,
-    /// Время изменения, Unix.
+    /// Modification time, Unix.
     #[serde(rename = "updatedAt")]
     pub updated_at: Option<i64>,
-    /// Идентификатор папки.
+    /// Folder identifier.
     #[serde(rename = "folderUuid")]
     pub folder_uuid: Option<String>,
-    /// Отметка «в корзине». Удалённая запись сохраняется в экспорте.
+    /// Trashed flag. A deleted record still stays in the export.
     pub trashed: Option<bool>,
-    /// Открытое содержимое: например, теги.
+    /// Open contents: tags, for example.
     #[serde(rename = "openContents", default)]
     pub open_contents: Option<serde_json::Map<String, serde_json::Value>>,
-    /// Метка времени последней операции.
+    /// Timestamp of the last transaction.
     #[serde(rename = "txTimestamp", default)]
     pub tx_timestamp: Option<i64>,
 
-    /// Исходная строка JSON из файла.
+    /// The original JSON line from the file.
     ///
-    /// Сохраняется, чтобы при записи выдать неизменённые записи байт в
-    /// байт. Через `PifItem` пройдут не все поля 1PIF — например,
-    /// `txTimestamp`, `trashed` и `openContents` — и пересериализация
-    /// стерла бы их молча. Сырая строка от этого страхует.
+    /// Kept so that a save writes untouched records back byte for
+    /// byte. Not every 1PIF field survives `PifItem` — `txTimestamp`,
+    /// `trashed` and `openContents`, for instance — and re-serializing would
+    /// silently drop them. The raw line guards against that.
     #[serde(skip)]
     pub raw: String,
 
-    /// Запись меняли: её нужно сериализовать заново.
+    /// The record was edited, so it has to be serialized afresh.
     #[serde(skip)]
     pub dirty: bool,
 }
 
-/// Расшифрованное содержимое записи.
+/// Decrypted record contents.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct SecureContents {
-    /// Поля записи. Их используют только веб-формы.
+    /// Record fields. Only web forms use them.
     #[serde(default)]
     pub fields: Vec<PifField>,
-    /// Пароль записи одной строкой — так его пишут записи типа
-    /// `passwords.Password`. Поле `fields` у них может быть пустым.
+    /// The record's password as one string — how `passwords.Password`
+    /// records write it. Their `fields` may be empty.
     #[serde(default)]
     pub password: Option<String>,
-    /// Заметки в открытом виде (если запись их допускает).
+    /// Notes in plaintext (when the record type allows them).
     #[serde(rename = "notesPlain")]
     pub notes_plain: Option<String>,
-    /// Заметки в base64 (старый формат).
+    /// Notes in base64 (old format).
     pub notes: Option<String>,
-    /// Список URL.
+    /// URL list.
     #[serde(rename = "URLs", default)]
     pub urls: Vec<PifUrl>,
-    /// История паролей.
+    /// Password history.
     #[serde(rename = "passwordHistory", default)]
     pub password_history: Vec<PifHistoryEntry>,
-    /// Секции формы: описание вкладок и полей с подписями.
+    /// Form sections: tabs and their labelled fields.
     #[serde(default)]
     pub sections: Vec<PifSection>,
-    /// Ключи, специфичные для типа записи.
+    /// Keys specific to the record type.
     ///
-    /// Для карт, почты, лицензий и документов данные лежат прямо в
-    /// `secureContents` — `ccnum`, `pop_password`, `reg_code` и так далее.
-    /// Универсального списка таких ключей нет, поэтому они собираются в
-    /// эту карту, а не выписываются в структуру по одному на каждый тип.
+    /// For cards, mail, licences and documents the data sits directly in
+    /// `secureContents` — `ccnum`, `pop_password`, `reg_code` and so on.
+    /// There is no universal list of such keys, so they land in
+    /// this map instead of being spelled out one per type in the struct.
     #[serde(flatten)]
     pub extra: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
-/// Секция записи — описание одной вкладки.
+/// A record section — the description of one tab.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct PifSection {
-    /// Подпись вкладки.
+    /// Tab label.
     pub title: Option<String>,
-    /// Внутреннее имя вкладки.
+    /// The tab's internal name.
     pub name: Option<String>,
-    /// Поля секции.
+    /// Section fields.
     #[serde(default)]
     pub fields: Vec<PifSectionField>,
 }
 
-/// Поле внутри секции.
+/// A field inside a section.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct PifSectionField {
-    /// Тип значения: `string`, `concealed`, `monthYear`, …
+    /// Value type: `string`, `concealed`, `monthYear`, …
     pub k: Option<String>,
-    /// Внутреннее имя поля.
+    /// The field's internal name.
     pub n: Option<String>,
-    /// Значение.
+    /// Value.
     #[serde(default)]
     pub v: Option<serde_json::Value>,
-    /// Подпись поля для интерфейса.
+    /// Field label for the UI.
     pub t: Option<String>,
-    /// Атрибуты: `guarded`, `clipboardFilter` и прочие.
+    /// Attributes: `guarded`, `clipboardFilter` and the like.
     #[serde(default)]
     pub a: Option<serde_json::Value>,
 }
 
-/// Поле записи.
+/// A record field.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PifField {
-    /// Тип поля: `T` (текст), `P` (пароль), `C` (секрет), `I` (кнопка), …
+    /// Field type: `T` (text), `P` (password), `C` (secret), `I` (button), …
     ///
-    /// В реальных экспортах ключ иногда отсутствует — потому необязателен.
+    /// Real exports sometimes omit the key, hence the default.
     #[serde(rename = "type", default)]
     pub field_type: String,
-    /// Имя поля.
+    /// Field name.
     #[serde(default)]
     pub name: Option<String>,
-    /// Значение. Для `P`/`C` это секрет.
+    /// Value. For `P`/`C` this is a secret.
     #[serde(default)]
     pub value: String,
-    /// Идентификатор элемента интерфейса.
+    /// UI element identifier.
     #[serde(rename = "designation")]
     pub designation: Option<String>,
-    /// Ссылка на секцию.
+    /// Link to a section.
     pub section: Option<PifSectionRef>,
 }
 
-/// Ссылка на секцию.
+/// Link to a section.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PifSectionRef {
-    /// Идентификатор секции.
+    /// Section identifier.
     pub id: Option<String>,
 }
 
-/// URL записи.
+/// A record URL.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PifUrl {
-    /// Адрес.
+    /// Address.
     pub url: Option<String>,
 }
 
-/// Запись истории паролей.
+/// A password history entry.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PifHistoryEntry {
-    /// Значение (секрет).
+    /// Value (a secret).
     #[serde(default)]
     pub value: String,
-    /// Время изменения, Unix.
+    /// Modification time, Unix.
     pub time: Option<i64>,
 }
 
-/// Верхнеуровневый объект старого формата.
+/// Top-level object of the old format.
 #[derive(Debug, Deserialize)]
 struct PifDocument {
     #[serde(default)]
     items: Vec<PifItem>,
 }
 
-/// Разобранный экспорт.
+/// A parsed export.
 #[derive(Debug, Clone)]
 pub struct Pif {
-    /// Все записи, включая папки.
+    /// All records, folders included.
     pub items: Vec<PifItem>,
-    /// Число строк-разделителей `***<uuid>***` в файле.
+    /// Number of `***<uuid>***` separator lines in the file.
     ///
-    /// Это НЕ вложения: во всей выгрузке разделитель один и тот же, он
-    /// остался от старого формата и отделяет записи друг от друга.
-    /// Сами вложения лежат в каталоге `attachments` рядом с файлом, см.
+    /// These are NOT attachments: the separator is the same string throughout
+    /// the dump, a leftover from the old format that keeps records apart.
+    /// The attachments themselves live in the `attachments` directory next to
     /// [`Pif::attachments`].
     pub record_separators: usize,
-    /// Вложения по записи: uuid записи → её файлы.
+    /// Attachments per record: record uuid → its files.
     pub attachments: HashMap<String, Vec<Attachment>>,
-    /// Строка-разделитель между записями.
+    /// The separator line written between records.
     pub separator: String,
-    /// Вложения, уходящие в корзину при следующем сохранении.
+    /// Attachments that go to the trash on the next save.
     ///
-    /// Хранятся вместе с uuid записи: корзина повторяет структуру
-    /// `attachments`, чтобы по каталогу было видно, откуда файл.
+    /// Stored alongside the record uuid: the trash mirrors the
+    /// `attachments` layout, so the directory shows where a file came from.
     pub attachments_to_trash: Vec<(String, PathBuf)>,
-    /// Путь к файлу экспорта: нужен, чтобы положить вложение рядом с ним.
+    /// Path to the export file: needed to place an attachment beside it.
     pub source_path: Option<PathBuf>,
 }
 
-/// Разделитель, который 1Password пишет в выгрузке.
+/// The separator 1Password writes into a dump.
 pub const DEFAULT_SEPARATOR: &str = "***5642bee8-a5ff-11dc-8314-0800200c9a66***";
 
-/// Файл, приложенный к записи.
+/// A file attached to a record.
 #[derive(Debug, Clone)]
 pub struct Attachment {
-    /// Имя файла.
+    /// File name.
     pub name: String,
-    /// Размер в байтах.
+    /// Size in bytes.
     pub size: u64,
-    /// Полный путь на диске.
+    /// Full path on disk.
     pub path: PathBuf,
-    /// Откуда файл будет скопирован при сохранении.
+    /// Where the file will be copied from on save.
     ///
-    /// `Some` — файл выбран пользователем и ещё не лежит в экспорте.
-    /// `None` — файл уже на месте.
+    /// `Some` — the user picked the file and it is not in the export yet.
+    /// `None` — the file is already in place.
     pub pending_source: Option<PathBuf>,
 }
 
 impl Attachment {
-    /// Есть ли картинка, которую можно показать.
+    /// Whether there is an image worth displaying.
     pub fn is_image(&self) -> bool {
         matches!(
             self.name
@@ -256,15 +256,15 @@ impl Attachment {
 }
 
 impl Pif {
-    /// Разбирает содержимое файла экспорта.
+    /// Parses the contents of an export file.
     ///
-    /// Принимает и JSON Lines, и единый JSON-объект с полем `items`.
-    /// Служебные строки `***<uuid>***` пропускаются.
+    /// Accepts both JSON Lines and a single JSON object with an `items`
+    /// field. Service strings `***<uuid>***` are skipped.
     pub fn parse(text: &str) -> Result<Self, PifError> {
         let trimmed = text.trim_start();
 
         if trimmed.starts_with('{') && !trimmed.starts_with("{\"uuid\"") {
-            // единый объект-обёртка
+            // single wrapper object
             let doc: PifDocument = serde_json::from_str(text).map_err(PifError::Json)?;
             return Ok(Self {
                 items: doc.items,
@@ -316,7 +316,7 @@ impl Pif {
         })
     }
 
-    /// Читает файл экспорта и подхватывает вложения из каталога рядом.
+    /// Reads an export file and picks up attachments from the neighbouring directory.
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, PifError> {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path).map_err(|e| PifError::Io {
@@ -326,24 +326,24 @@ impl Pif {
         let mut parsed = Self::parse(&text)?;
         parsed.attachments = scan_attachments(path, &parsed.items);
         parsed.source_path = Some(path.to_path_buf());
-        // Просроченное из корзины убираем сразу при открытии файла.
+        // Drop anything past its trash deadline right when the file is opened.
         parsed.purge_trash();
         Ok(parsed)
     }
 
-    /// Создаёт новое пустое хранилище 1PIF в каталоге `dir`.
+    /// Creates a new empty 1PIF store in `dir`.
     ///
-    /// Файл получается не совсем пустым: [`Pif::parse`] считает пустой файл
-    /// ошибкой — это защита от открытия не того файла, — поэтому внутрь
-    /// кладётся одна запись-папка. Папки не показываются ни в списке, ни в
-    /// категориях, но делают файл валидным, иначе созданное хранилище не
-    /// открылось бы при следующем запуске.
+    /// The file is not quite empty: [`Pif::parse`] treats an empty file as an
+    /// error — a guard against opening the wrong file — so a single folder
+    /// record goes inside. Folders show up neither in the list nor in
+    /// categories, yet they make the file valid; otherwise the store we just
+    /// created would not open on the next launch.
     ///
-    /// `contentsHash` не пишется: как он считается, неизвестно, а выдуманное
-    /// значение хуже его отсутствия. Принимает ли 1Password такой файл на
-    /// импорте — не проверено.
+    /// `contentsHash` is not written: how it is computed is unknown, and a
+    /// made-up value is worse than none. Whether 1Password accepts such a
+    /// file on import is unverified.
     ///
-    /// Уже существующий `data.1pif` не трогается: возвращается [`PifError::Exists`].
+    /// An existing `data.1pif` is left alone: [`PifError::Exists`] is returned.
     pub fn create(dir: impl AsRef<Path>) -> Result<Self, PifError> {
         let dir = dir.as_ref();
         let data = dir.join("data.1pif");
@@ -367,15 +367,15 @@ impl Pif {
         Ok(starter)
     }
 
-    /// Сохраняет изменения в файл.
+    /// Writes the changes to the file.
     ///
-    /// Перед записью делается резервная копия: `data.1pif` → `.bak1`, а
-    /// прежние копии сдвигаются, так что хранится [`BACKUP_KEEP`] последних
-    /// версий. Запись идёт во временный файл с последующим переименованием,
-    /// чтобы прерванное сохранение не оставило обрезанный `data.1pif`.
+    /// A backup is taken before writing: `data.1pif` → `.bak1`, and
+    /// older copies shift down, so the last [`BACKUP_KEEP`] versions are kept.
+    /// The write goes to a temp file followed by a rename, so that an
+    /// interrupted save never leaves a truncated `data.1pif`.
     ///
-    /// Неизменённые записи выписываются из [`PifItem::raw`] как есть, поэтому
-    /// поля, о которых парсер не знает, переживают сохранение.
+    /// Unmodified records are emitted from [`PifItem::raw`] verbatim, so fields
+    /// the parser knows nothing about survive a save.
     pub fn save(&mut self, path: impl AsRef<Path>) -> Result<(), PifError> {
         let path = path.as_ref();
 
@@ -396,7 +396,7 @@ impl Pif {
             out.push('\n');
         }
 
-        // Пишем рядом с целью: временный файл обязан быть на том же томе.
+        // Write next to the target: the temp file has to be on the same volume.
         let tmp = path.with_extension("1pif.tmp");
         std::fs::write(&tmp, out.as_bytes()).map_err(|e| PifError::Io {
             path: tmp.display().to_string(),
@@ -410,30 +410,30 @@ impl Pif {
         self.flush_attachments()
     }
 
-    /// Помечает запись изменённой, чтобы при сохранении она переписалась.
+    /// Marks a record as edited so that a save rewrites it.
     pub fn touch(&mut self, uuid: &str) {
         if let Some(it) = self.items.iter_mut().find(|i| i.uuid == uuid) {
             it.dirty = true;
         }
     }
 
-    /// Есть ли несохранённые изменения.
+    /// Whether there are unsaved changes.
     pub fn has_changes(&self) -> bool {
         self.items.iter().any(|i| i.dirty)
     }
 
-    /// Снимает отметки об изменениях: файл записан.
+    /// Clears the dirty flags: the file has been written.
     pub fn mark_saved(&mut self) {
         for it in &mut self.items {
             it.dirty = false;
         }
     }
 
-    /// Прикрепляет файл к записи. Ничего не пишет на диск до [`Pif::save`].
+    /// Attaches a file to a record. Nothing touches disk until [`Pif::save`].
     ///
-    /// Связь в 1PIF держится только на имени каталога: `attachments/<uuid
-    /// записи>/<файл>`. Ссылки в JSON нет, поэтому копирования файла
-    /// достаточно — сам `data.1pif` менять не нужно.
+    /// In 1PIF the link is carried by the directory name alone:
+    /// `attachments/<record uuid>/<file>`. There is no reference in the JSON,
+    /// so copying the file is enough and `data.1pif` itself stays untouched.
     pub fn attach(&mut self, uuid: &str, source: &Path) -> Result<Attachment, PifError> {
         let meta = std::fs::metadata(source).map_err(|e| PifError::Io {
             path: source.display().to_string(),
@@ -449,7 +449,7 @@ impl Pif {
 
         let dir = self.attachments_dir_for(uuid)?;
 
-        // Имя внутри каталога не должно совпадать с уже существующим.
+        // The name inside the directory must not clash with an existing one.
         let mut final_name = name.clone();
         let mut n = 1;
         while dir.join(&final_name).exists()
@@ -475,7 +475,7 @@ impl Pif {
         Ok(att)
     }
 
-    /// Открепляет файл. Файл удаляется с диска только при [`Pif::save`].
+    /// Detaches a file. It is deleted from disk only on [`Pif::save`].
     pub fn detach(&mut self, uuid: &str, name: &str) -> bool {
         let Some(list) = self.attachments.get_mut(uuid) else {
             return false;
@@ -487,7 +487,7 @@ impl Pif {
         if list.is_empty() {
             self.attachments.remove(uuid);
         }
-        // Несуществующий файл удалять незачем, ещё не скопированный — тем более.
+        // No point deleting a file that is not there, let alone one not copied yet.
         if removed.pending_source.is_none() && removed.path.exists() {
             self.attachments_to_trash
                 .push((uuid.to_string(), removed.path));
@@ -495,12 +495,12 @@ impl Pif {
         true
     }
 
-    /// Вложения записи.
+    /// A record's attachments.
     pub fn attachments_of(&self, uuid: &str) -> &[Attachment] {
         self.attachments.get(uuid).map(Vec::as_slice).unwrap_or(&[])
     }
 
-    /// Есть ли отложенные изменения вложений.
+    /// Whether attachment changes are pending.
     pub fn attachments_changed(&self) -> bool {
         !self.attachments_to_trash.is_empty()
             || self
@@ -510,7 +510,7 @@ impl Pif {
                 .any(|a| a.pending_source.is_some())
     }
 
-    /// Каталог вложений записи.
+    /// The record's attachment directory.
     fn attachments_dir_for(&self, uuid: &str) -> Result<PathBuf, PifError> {
         if let Some(dir) = self
             .attachments
@@ -526,9 +526,9 @@ impl Pif {
                 source: std::io::Error::other("export file is not open"),
             });
         };
-        // Каталог вложений лежит рядом с файлом экспорта, а не внутри него:
-        // `Имя….1pif/attachments/`, а `Имя….1pif/data.1pif/attachments/`
-        // — это уже другой путь и он не существует.
+        // The attachment directory sits beside the export file, not inside it:
+        // `Name….1pif/attachments/`, while `Name….1pif/data.1pif/attachments/`
+        // is a different path that does not exist.
         let dir = pif_path
             .parent()
             .map(|p| p.join("attachments"))
@@ -536,14 +536,14 @@ impl Pif {
         Ok(dir.join(uuid))
     }
 
-    /// Переносит отложенные изменения вложений на диск.
+    /// Flushes the pending attachment changes to disk.
     fn flush_attachments(&mut self) -> Result<(), PifError> {
         let err = |e: std::io::Error, p: &Path| PifError::Io {
             path: p.display().to_string(),
             source: e,
         };
 
-        // Сначала копируем новые файлы: сорвавшись, ничего не теряем.
+        // New files go first: if anything fails, nothing is lost yet.
         let mut done: Vec<(String, String)> = Vec::new();
         for (uuid, list) in &self.attachments {
             for att in list {
@@ -570,26 +570,26 @@ impl Pif {
             }
         }
 
-        // И только потом отправляем удаляемое в корзину.
+        // Only then do the deletions move to the trash.
         let trash = self.trash_dir();
         for (uuid, path) in std::mem::take(&mut self.attachments_to_trash) {
             if let Some(dir) = &trash {
                 let _ = move_to_trash(dir, &uuid, &path);
             } else {
-                // Корзина недоступна: удаляем, но это крайний случай.
+                // No trash available: delete outright, last resort.
                 let _ = std::fs::remove_file(&path);
             }
         }
         Ok(())
     }
 
-    /// Создаёт новую запись выбранного типа. Возвращает её uuid.
+    /// Creates a new record of the chosen type. Returns its uuid.
     ///
-    /// Имена полей скопированы из настоящей выгрузки. Блок `sections` не
-    /// пишется: в выгрузке он идёт параллельно верхнеуровневым ключам, наш
-    /// разбор читает оба, а лишняя структура в созданном файле только
-    /// добавила бы мест, где можно ошибиться. Примет ли 1Password такую
-    /// запись — не проверено, как и всё остальное, что мы пишем сами.
+    /// Field names are copied from a real dump. The `sections` block is not
+    /// written: in a dump it runs alongside the top-level keys, our
+    /// parser reads both, and the extra structure would only add places to
+    /// get wrong in a file we create. Whether 1Password accepts such a
+    /// record is unverified, same as everything else we write ourselves.
     pub fn create_item(&mut self, draft: &EntryDraft, kind: ItemKind) -> String {
         let uuid = new_uuid();
         let now = unix_now();
@@ -623,8 +623,8 @@ impl Pif {
         let a = draft.extra_a.trim();
         let b = draft.extra_b.trim();
 
-        // Кладёт пару «ключ → значение», пропуская пустые значения: незаполненное
-        // поле в выгрузке не встречается.
+        // Stores a "key → value" pair, skipping empty values: an unfilled
+        // field never appears in a dump.
         let mut put = |key: &str, value: &str| {
             if !value.is_empty() {
                 sc.extra.insert(key.to_string(), value.into());
@@ -632,8 +632,8 @@ impl Pif {
         };
 
         match kind {
-            // Единственный тип с полями `designation`: только у него логин и
-            // пароль читаются однозначно.
+            // The only type with `designation` fields: only here are login and
+            // password unambiguous.
             ItemKind::Login => {
                 set_designated(&mut sc.fields, "username", "username", "T", user);
                 set_designated(&mut sc.fields, "password", "password", "P", pass);
@@ -664,7 +664,7 @@ impl Pif {
                     sc.notes_plain = Some(notes.to_string());
                 }
             }
-            // Срок действия хранится двумя ключами: месяц и год.
+            // Expiry is kept in two keys: month and year.
             ItemKind::CreditCard => {
                 put("cardholder", user);
                 put("ccnum", pass);
@@ -693,9 +693,9 @@ impl Pif {
             }
             ItemKind::Server => {
                 put("username", user);
-                // Ключ `password` у сервера совпадает с типизированным полем
-                // SecureContents. Класть его в `extra` нельзя: при сериализации
-                // serde выведет оба, и файл станет невалидным.
+                // The server's `password` key collides with the typed
+                // `SecureContents` field. It cannot go into `extra`: serde would emit
+                // both on serialization and the file would become invalid.
                 if !pass.is_empty() {
                     sc.password = Some(pass.to_string());
                 }
@@ -711,8 +711,8 @@ impl Pif {
                 put("publisher_website", notes);
                 put("product_version", b);
             }
-            // У документа личности в выгрузке есть номер и кем выдано;
-            // остальное тип не хранит.
+            // An identity document keeps its number and issuer in a dump;
+            // the type stores nothing else.
             ItemKind::Identity => {
                 put("type", user);
                 put("number", pass);
@@ -727,15 +727,15 @@ impl Pif {
         uuid
     }
 
-    /// Создаёт новую запись-логин. Возвращает её uuid.
+    /// Creates a new login record. Returns its uuid.
     ///
-    /// Создаётся веб-форма: только у неё в выгрузке есть поля с
-    /// `designation`, а значит логин и пароль читаются однозначно.
+    /// It is created as a web form: only those carry `designation` fields
+    /// in a dump, which is what makes login and password unambiguous.
     ///
-    /// Поле `contentsHash` не заполняется — алгоритм этой суммы не
-    /// подтверждён, и выдуманное значение было бы ложью. Для работы
-    /// приложения оно не нужно, но импорт такого файла обратно в 1Password
-    /// может не пройти.
+    /// `contentsHash` is left unset — the algorithm behind that sum is
+    /// unconfirmed, and a fabricated value would be a lie. The app does not
+    /// need it to work, but importing such a file back into 1Password may
+    /// fail.
     pub fn create_login(&mut self, draft: &EntryDraft) -> String {
         let uuid = new_uuid();
         let now = unix_now();
@@ -764,7 +764,7 @@ impl Pif {
         uuid
     }
 
-    /// Удаляет запись. Возвращает `true`, если запись была.
+    /// Deletes a record. Returns `true` if it existed.
     pub fn remove(&mut self, uuid: &str) -> bool {
         let before = self.items.len();
         self.items.retain(|i| i.uuid != uuid);
@@ -778,24 +778,24 @@ impl Pif {
         self.items.len() != before
     }
 
-    /// Запись по uuid.
+    /// Record by uuid.
     pub fn find(&self, uuid: &str) -> Option<&PifItem> {
         self.items.iter().find(|i| i.uuid == uuid)
     }
 
-    /// Запись по uuid для правки.
+    /// Record by uuid, for editing.
     pub fn find_mut(&mut self, uuid: &str) -> Option<&mut PifItem> {
         self.items.iter_mut().find(|i| i.uuid == uuid)
     }
 
-    /// Папка по uuid.
+    /// Folder by uuid.
     pub fn folder(&self, uuid: &str) -> Option<&PifItem> {
         self.items
             .iter()
             .find(|i| i.uuid == uuid && i.type_name.as_deref() == Some(FOLDER_TYPE))
     }
 
-    /// Сколько живых записей лежит в папке.
+    /// How many live records the folder holds.
     pub fn folder_count(&self, uuid: &str) -> usize {
         self.items
             .iter()
@@ -807,10 +807,10 @@ impl Pif {
             .count()
     }
 
-    /// Создаёт папку и возвращает её uuid.
+    /// Creates a folder and returns its uuid.
     ///
-    /// Как и у записей, `contentsHash` не заполняется: алгоритм суммы не
-    /// подтверждён, а выдуманное значение хуже отсутствия.
+    /// As with records, `contentsHash` stays unset: the sum's algorithm is
+    /// unconfirmed, and a made-up value is worse than none.
     pub fn create_folder(&mut self, title: &str) -> String {
         let uuid = new_uuid();
         let now = unix_now();
@@ -841,7 +841,7 @@ impl Pif {
         uuid
     }
 
-    /// Переименовывает папку. Возвращает `false`, если папки нет.
+    /// Renames a folder. Returns `false` if there is no such folder.
     pub fn rename_folder(&mut self, uuid: &str, title: &str) -> bool {
         let title = title.trim();
         let Some(folder) = self
@@ -860,10 +860,10 @@ impl Pif {
         true
     }
 
-    /// Удаляет папку. Её записи не удаляются: у них просто пропадает ссылка.
+    /// Deletes a folder. Its records are not deleted: they just lose the link.
     ///
-    /// Так же ведёт себя сам 1Password — убрать папку и потерять всё её
-    /// содержимое было бы слишком легко потерять данные по неосторожности.
+    /// 1Password behaves the same way — removing a folder and losing all of
+    /// its contents would be a careless way to lose data.
     pub fn remove_folder(&mut self, uuid: &str) -> bool {
         if self.folder(uuid).is_none() {
             return false;
@@ -882,10 +882,10 @@ impl Pif {
         touched
     }
 
-    /// Кладёт запись в папку. Пустой `folder` кладёт её на верхний уровень.
+    /// Puts a record in a folder. An empty `folder` puts it at the top level.
     ///
-    /// Запись должна существовать; иначе тихо ничего не делается, потому
-    /// что возвращать ошибку из обработчика интерфейса незачем.
+    /// The record has to exist; otherwise nothing happens quietly, because
+    /// a UI handler has no reason to return an error.
     pub fn set_folder(&mut self, uuid: &str, folder: Option<&str>) -> bool {
         let Some(item) = self
             .items
@@ -895,7 +895,7 @@ impl Pif {
             return false;
         };
 
-        // Пустая строка означает «без папки», а не папку с таким uuid.
+        // An empty string means "no folder", not a folder with such a uuid.
         let target = folder.filter(|f| !f.is_empty());
         if item.folder_uuid.as_deref() == target {
             return true;
@@ -906,7 +906,7 @@ impl Pif {
         true
     }
 
-    /// Записи, исключая папки.
+    /// Records, folders excluded.
     pub fn entries(&self) -> Vec<&PifItem> {
         self.items
             .iter()
@@ -914,7 +914,7 @@ impl Pif {
             .collect()
     }
 
-    /// Записи в корзине: помечены `trashed: true`.
+    /// Trashed records: marked `trashed: true`.
     pub fn trashed(&self) -> Vec<&PifItem> {
         self.items
             .iter()
@@ -922,7 +922,7 @@ impl Pif {
             .collect()
     }
 
-    /// Живые записи, без корзины и папок.
+    /// Live records: neither trashed nor folders.
     pub fn alive(&self) -> Vec<&PifItem> {
         self.items
             .iter()
@@ -930,10 +930,10 @@ impl Pif {
             .collect()
     }
 
-    /// Папки: записи с `typeName: system.folder.Regular`.
+    /// Folders: records with `typeName: system.folder.Regular`.
     ///
-    /// Папка в 1PIF — обычная запись особого типа, и отличие у неё одно:
-    /// у прочих записей вместо `folderUuid` стоит ссылка на неё.
+    /// A folder in 1PIF is an ordinary record of a special type, and it
+    /// differs in exactly one way: other records carry `folderUuid` pointing at it.
     pub fn folders(&self) -> Vec<&PifItem> {
         self.items
             .iter()
@@ -941,7 +941,7 @@ impl Pif {
             .collect()
     }
 
-    /// Ищет по заголовку, домену и URL — без учёта регистра.
+    /// Searches title, domain and URL, case-insensitively.
     pub fn search(&self, query: &str) -> Vec<&PifItem> {
         let q = query.to_lowercase();
         self.entries()
@@ -951,14 +951,14 @@ impl Pif {
     }
 }
 
-/// Код типа папки.
+/// Folder type code.
 pub const FOLDER_TYPE: &str = "system.folder.Regular";
 
-/// Запись, с которой начинается новое хранилище.
+/// The record a new store starts with.
 ///
-/// Ровно одна папка: она не мешает пользователю (папки скрыты из списков) и
-/// делает файл разбираемым. Поля повторяют настоящий экспорт 1Password;
-/// `contentsHash` отсутствует намеренно, см. [`Pif::create`].
+/// Exactly one folder: it does not get in the user's way (folders are
+/// hidden from the lists) and it makes the file parseable. The fields
+/// mirror a real 1Password export; `contentsHash` is absent on purpose, see [`Pif::create`].
 const STARTER_DOCUMENT: &str = concat!(
     r#"{"uuid":"00000000000000000000000000000001","securityLevel":"SL5","#,
     r#""title":"My Items","secureContents":{},"typeName":"system.folder.Regular"}"#
@@ -974,7 +974,7 @@ fn is_attachment_marker(s: &str) -> bool {
 }
 
 impl PifItem {
-    /// Поле, безопасное для показа и поиска.
+    /// A field that is safe to display and search.
     fn matches(&self, lower_q: &str) -> bool {
         let hit = |s: Option<&String>| {
             s.map(|v| v.to_lowercase().contains(lower_q))
@@ -1000,7 +1000,7 @@ impl PifItem {
                 .unwrap_or(false))
     }
 
-    /// Тип записи для показа: человекочитаемое имя.
+    /// Record type for display: a human-readable name.
     pub fn kind(&self) -> &str {
         match self.type_name.as_deref().unwrap_or("") {
             "webforms.WebForm" => "Logins",
@@ -1017,13 +1017,13 @@ impl PifItem {
         }
     }
 
-    /// Основной пароль записи.
+    /// The record's main password.
     ///
-    /// В реальных экспортах у веб-форм бывает несколько непустых полей типа
-    /// `P` (например, пароль регистрации рядом с паролем входа), поэтому
-    /// первое по счёту брать нельзя. Каноническое поле помечено
-    /// `designation: "password"`; `secureContents.password` — запасной
-    /// источник для записей без `fields`.
+    /// Real exports often give a web form several non-empty `P` fields
+    /// (a registration password next to the login one, say), so the first one
+    /// cannot be taken by position. The canonical field is tagged
+    /// `designation: "password"`; `secureContents.password` is the fallback
+    /// for records without `fields`.
     pub fn primary_password(&self) -> Option<&str> {
         let sc = self.secure_contents.as_ref()?;
 
@@ -1057,11 +1057,11 @@ impl PifItem {
             .map(|f| f.value.as_str())
     }
 
-    /// Логины записи: `username`, `login`, `email` и их варианты.
+    /// The record's logins: `username`, `login`, `email` and their variants.
     ///
-    /// Сначала берётся поле с `designation: "username"` — это канонический
-    /// логин. Остальные имена используются как запасной вариант, потому что
-    /// в выгрузке встречаются и `pass`, и `Имя пользователя`.
+    /// The field tagged `designation: "username"` comes first — that is the
+    /// canonical login. The other names serve as a fallback because a dump
+    /// contains both `pass` and `Имя пользователя`.
     pub fn usernames(&self) -> Vec<&str> {
         let Some(sc) = self.secure_contents.as_ref() else {
             return Vec::new();
@@ -1084,7 +1084,7 @@ impl PifItem {
             .filter(|v| !v.trim().is_empty())
             .collect();
 
-        // Серверы хранят логин плоским ключом, без полей формы.
+        // Servers keep the login in a flat key, with no form fields.
         if by_designation.is_empty() && by_name.is_empty() {
             if let Some(v) = sc.extra.get("username").and_then(|v| value_as_str(v)) {
                 let v = v.trim();
@@ -1108,7 +1108,7 @@ impl PifItem {
         out
     }
 
-    /// Адреса из поля `location` и из раздела `URLs`, без повторов.
+    /// Addresses from the `location` field and the `URLs` section, no duplicates.
     pub fn urls(&self) -> Vec<&str> {
         let mut out: Vec<&str> = Vec::new();
 
@@ -1125,7 +1125,7 @@ impl PifItem {
                     }
                 }
             }
-            // Лицензии, документы и почта хранят адреса плоскими ключами.
+            // Licences, documents and mail keep addresses in flat keys.
             for key in [
                 "website",
                 "download_link",
@@ -1143,7 +1143,7 @@ impl PifItem {
         out
     }
 
-    /// Поле TOTP: значение с префиксом `otpauth://`.
+    /// The TOTP field: a value prefixed with `otpauth://`.
     pub fn totp(&self) -> Option<&str> {
         self.secure_contents.as_ref()?.fields.iter().find_map(|f| {
             if f.value.starts_with("otpauth://") {
@@ -1154,20 +1154,20 @@ impl PifItem {
         })
     }
 
-    /// Заметки в открытом виде.
+    /// Notes in plaintext.
     pub fn notes(&self) -> Option<&str> {
         self.secure_contents.as_ref()?.notes_plain.as_deref()
     }
 
-    /// Поля, специфичные для типа записи: номер карты, срок, POP/SMTP,
-    /// ключ лицензии, номер документа.
+    /// Fields specific to the record type: card number, expiry, POP/SMTP,
+    /// licence key, document number.
     ///
-    /// Только у веб-форм данные лежат в `fields[]`; у карт, почты,
-    /// лицензий и документов — плоскими ключами в `secureContents`
-    /// плюс дублями в `sections`. Сначала берутся плоские ключи, затем
-    /// недостающее добирается из секций по подписи поля.
+    /// Only web forms keep their data in `fields[]`; cards, mail,
+    /// licences and documents use flat keys in `secureContents` plus duplicates
+    /// in `sections`. Flat keys are read first, whatever is missing is then
+    /// dug out of the sections by field label.
     ///
-    /// Возвращает пары «подпись, значение» и флаг, нужно ли маскировать.
+    /// Returns `(label, value, mask)` triples.
     pub fn extra_fields(&self) -> Vec<(String, String, bool)> {
         let Some(sc) = self.secure_contents.as_ref() else {
             return Vec::new();
@@ -1175,7 +1175,7 @@ impl PifItem {
 
         let mut out: Vec<(String, String, bool)> = Vec::new();
 
-        // 1. Плоские ключи — источник правды.
+        // 1. Flat keys are the source of truth.
         for (key, raw) in &sc.extra {
             if let Some((label, secret)) = describe_key(key) {
                 if let Some(v) = value_to_string(raw) {
@@ -1184,7 +1184,7 @@ impl PifItem {
             }
         }
 
-        // 2. Секции — добираем то, чего нет в плоских ключах.
+        // 2. Sections fill in what the flat keys do not have.
         for s in &sc.sections {
             for f in &s.fields {
                 let Some(name) = f.n.as_deref() else {
@@ -1211,13 +1211,13 @@ impl PifItem {
     }
 }
 
-/// Добавляет пару в список, если её там ещё нет.
+/// Adds a pair to the list unless it is already there.
 fn push_extra(out: &mut Vec<(String, String, bool)>, label: &str, value: String, secret: bool) {
     let value = value.trim().to_string();
     if value.is_empty() {
         return;
     }
-    // Одна и та же подпись или одно и то же значение дважды не нужны.
+    // The same label or the same value twice is redundant.
     if out
         .iter()
         .any(|(l, existing, _)| l == label || existing == &value)
@@ -1227,7 +1227,7 @@ fn push_extra(out: &mut Vec<(String, String, bool)>, label: &str, value: String,
     out.push((label.trim().to_string(), value, secret));
 }
 
-/// Строковое значение JSON, без копирования.
+/// A JSON string value, borrowed without copying.
 fn value_as_str(v: &serde_json::Value) -> Option<&str> {
     match v {
         serde_json::Value::String(s) => Some(s.as_str()),
@@ -1235,7 +1235,7 @@ fn value_as_str(v: &serde_json::Value) -> Option<&str> {
     }
 }
 
-/// Значение JSON в строку, если это вообще значение.
+/// A JSON value as a string, if it is one.
 fn value_to_string(v: &serde_json::Value) -> Option<String> {
     match v {
         serde_json::Value::String(s) => Some(s.clone()),
@@ -1245,7 +1245,7 @@ fn value_to_string(v: &serde_json::Value) -> Option<String> {
     }
 }
 
-/// Поле помечено как секретное.
+/// The field is marked secret.
 fn guarded(f: &PifSectionField) -> bool {
     f.a.as_ref()
         .and_then(|a| a.get("guarded"))
@@ -1253,12 +1253,12 @@ fn guarded(f: &PifSectionField) -> bool {
         == Some("yes")
 }
 
-/// Служебные имена полей: дубликаты под хешами и варианты конфликта.
+/// Internal field names: hashed duplicates and conflict variants.
 ///
-/// В выгрузке есть поля вида `A90930AA80B1461EA634F666DACB517C` — это тот же
-/// проверочный код, сохранённый под внутренним ключом, и
-/// `cvv_conflict_1` — вариант, отброшенный при разрешении конфликта.
-/// Показывать их пользователю незачем.
+/// A dump contains fields like `A90930AA80B1461EA634F666DACB517C` — the same
+/// security code saved under an internal key — and
+/// `cvv_conflict_1` — the variant discarded while resolving a conflict.
+/// There is no reason to show these to the user.
 fn is_noise_key(name: &str) -> bool {
     if name.ends_with("_conflict_1") {
         return true;
@@ -1267,10 +1267,10 @@ fn is_noise_key(name: &str) -> bool {
     hex && name.len() == 32
 }
 
-/// Подпись и признак секретности для известного ключа.
+/// Label and secrecy flag for a known key.
 fn describe_key(key: &str) -> Option<(&'static str, bool)> {
     let (label, secret): (&'static str, bool) = match key {
-        // Карта
+        // Card
         "cardholder" => ("Cardholder", true),
         "ccnum" => ("Card Number", true),
         "expiry" => ("Valid Thru", false),
@@ -1284,7 +1284,7 @@ fn describe_key(key: &str) -> Option<(&'static str, bool)> {
         "cashLimit" => ("Cash Limit", false),
         "creditLimit" => ("Credit Limit", false),
         "type" => ("Type", false),
-        // Почта
+        // Mail
         "provider" => ("Provider", false),
         "provider_website" => ("Provider Website", false),
         "pop_server" => ("POP Server", false),
@@ -1300,7 +1300,7 @@ fn describe_key(key: &str) -> Option<(&'static str, bool)> {
         "smtp_password" => ("SMTP Password", true),
         "smtp_security" => ("SMTP Encryption", false),
         "smtp_authentication" => ("SMTP Authentication", false),
-        // Лицензия
+        // Licence
         "reg_name" => ("Owner Name", false),
         "reg_code" => ("License Key", true),
         "product_version" => ("Version", false),
@@ -1311,7 +1311,7 @@ fn describe_key(key: &str) -> Option<(&'static str, bool)> {
         "order_date_mm" => ("Order Month", false),
         "order_date_yy" => ("Order Year", false),
         "company" => ("Company", false),
-        // Документы
+        // Documents
         "issuing_authority" => ("Issued By", false),
         "number" => ("Number", false),
         "issue_date" => ("Issue Date", false),
@@ -1319,69 +1319,69 @@ fn describe_key(key: &str) -> Option<(&'static str, bool)> {
         "issue_date_mm" => ("Issue Month", false),
         "issue_date_yy" => ("Issue Year", false),
         "name" => ("Name", false),
-        // Общее
+        // Common
         "website" => ("Website", false),
         _ => return None,
     };
     Some((label, secret))
 }
 
-/// Черновик записи для редактора.
+/// A record draft for the editor.
 ///
-/// Поля повторяют то, что приложение умеет показывать: название, логин,
-/// пароль, адрес и заметки. Остальное содержимое записи при правке не
-/// трогается — [`EntryDraft::apply`] меняет только перечисленное.
+/// The fields mirror what the app can display: title, login,
+/// password, URL and notes. The rest of the record contents are left
+/// alone on edit — [`EntryDraft::apply`] changes only what is listed here.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EntryDraft {
-    /// Название.
+    /// Title.
     pub title: String,
-    /// Логин.
+    /// Login.
     pub username: String,
-    /// Пароль.
+    /// Password.
     pub password: String,
-    /// Адрес.
+    /// URL.
     pub url: String,
-    /// Заметки.
+    /// Notes.
     pub notes: String,
-    /// Дополнительный слот: смысл зависит от типа записи.
+    /// Extra slot: its meaning depends on the record type.
     ///
-    /// У карты это срок действия, у сервера — порт, у лицензии — версия.
-    /// Отдельные слоты заведены потому, что у карты их два, а назвать их
-    /// как-то иначе нельзя: «заметки» уже заняты.
+    /// On a card it is the expiry, on a server the port, on a licence the
+    /// version. Separate slots exist because a card needs two of them,
+    /// and they cannot be named any other way: "notes" is taken already.
     pub extra_a: String,
-    /// Второй дополнительный слот: у карты это проверочный код.
+    /// Second extra slot: on a card it is the security code.
     pub extra_b: String,
 }
 
-/// Типы записей, которые приложение умеет создавать.
+/// Record types the app can create.
 ///
-/// Набор и имена полей взяты из настоящей выгрузки 1Password: у всех типов,
-/// кроме логина, данные лежат именованными ключами прямо в `secureContents`,
-/// а не в списке полей с `designation`.
+/// The set and the field names come from a real 1Password dump: for every
+/// type except login the data sits in named keys right inside
+/// `secureContents`, not in a list of `designation` fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemKind {
-    /// Логин с паролем.
+    /// Login with a password.
     Login,
-    /// Заметка без учётных данных.
+    /// A note with no credentials.
     SecureNote,
-    /// Пароль без логина.
+    /// A password with no login.
     Password,
-    /// Банковская карта.
+    /// Bank card.
     CreditCard,
-    /// Почтовая учётная запись.
+    /// Mail account.
     EmailAccount,
-    /// Паспорт.
+    /// Passport.
     Passport,
-    /// Сервер.
+    /// Server.
     Server,
-    /// Лицензия на программу.
+    /// Software licence.
     SoftwareLicence,
-    /// Документ, удостоверяющий личность.
+    /// Identity document.
     Identity,
 }
 
 impl ItemKind {
-    /// Значение `typeName` в выгрузке.
+    /// The `typeName` value in a dump.
     pub fn type_name(self) -> &'static str {
         match self {
             ItemKind::Login => "webforms.WebForm",
@@ -1396,7 +1396,7 @@ impl ItemKind {
         }
     }
 
-    /// Подпись типа в интерфейсе.
+    /// The type's label in the UI.
     pub fn label(self) -> String {
         match self {
             ItemKind::Login => "Login".to_string(),
@@ -1411,7 +1411,7 @@ impl ItemKind {
         }
     }
 
-    /// Все типы — так перебираются кнопки выбора в редакторе.
+    /// All types — this is what the pick buttons in the editor iterate over.
     pub fn all() -> [ItemKind; 9] {
         [
             ItemKind::Login,
@@ -1426,14 +1426,14 @@ impl ItemKind {
         ]
     }
 
-    /// Подписи полей формы для этого типа.
+    /// Field labels for this type.
     ///
-    /// Пять слотов черновика подписаны по-разному в зависимости от типа: в
-    /// карте «логин» — это владелец, а в лицензии — ключ. Пустая подпись
-    /// означает, что слот этому типу не нужен и поле не рисуется.
+    /// The five draft slots are labelled differently per type: on a card
+    /// "username" is the cardholder and on a licence the licence key. An
+    /// empty label means the slot is not needed for this type and the field
     ///
-    /// Порядок: слот логина, слот пароля, слот адреса, заметки, второй
-    /// дополнительный слот.
+    /// Order: login slot, password slot, URL slot, notes, second extra
+    /// slot.
     pub fn field_labels(self) -> [&'static str; 5] {
         match self {
             ItemKind::Login => ["Username", "Password", "URL", "", ""],
@@ -1467,11 +1467,11 @@ impl ItemKind {
     }
 }
 
-/// Разбирает «09/2027» или «09/27» на месяц и год, как их пишет 1Password.
+/// Splits "09/2027" or "09/27" into month and year, the way 1Password writes them.
 ///
-/// Год сохраняется четырьмя цифрами: в выгрузке он четырёхзначный, и
-/// двухзначный год при обратном импорте может быть прочитан как 2027-й или
-/// как 1927-й.
+/// The year is kept as four digits: in a dump it is four digits, and on
+/// a two-digit year on re-import could be read as 2027 or
+/// as 1927.
 fn split_expiry(raw: &str) -> (String, String) {
     let raw = raw.trim();
     let Some((mm, rest)) = raw.split_once('/') else {
@@ -1491,7 +1491,7 @@ fn split_expiry(raw: &str) -> (String, String) {
 }
 
 impl EntryDraft {
-    /// Собирает черновик из записи.
+    /// Builds a draft from a record.
     pub fn from_item(it: &PifItem) -> Self {
         Self {
             title: it.title.clone().unwrap_or_default(),
@@ -1499,18 +1499,18 @@ impl EntryDraft {
             password: it.primary_password().unwrap_or("").to_string(),
             url: it.urls().first().copied().unwrap_or("").to_string(),
             notes: it.notes().unwrap_or("").to_string(),
-            // Дополнительные слоты заполняются при создании записи
-            // конкретного типа: для правки они не нужны, потому что поля
-            // типа лежат в extra_fields и показываются отдельно.
+            // The extra slots are filled in when creating a record of a
+            // specific type: they are useless for editing, because that type's
+            // fields live in extra_fields and are displayed separately.
             extra_a: String::new(),
             extra_b: String::new(),
         }
     }
 
-    /// Вносит значения в запись.
+    /// Writes the values into a record.
     ///
-    /// Поля формы дописываются, если их нет: без `designation` нельзя
-    /// отличить настоящий пароль от подставного поля регистрации.
+    /// Form fields are appended when missing: without `designation` there is
+    /// no way to tell a real password from a decoy registration field.
     pub fn apply(&self, it: &mut PifItem) {
         it.title = Some(self.title.trim().to_string());
 
@@ -1518,14 +1518,14 @@ impl EntryDraft {
         it.updated_at = Some(now);
         it.tx_timestamp = Some(now);
 
-        // Поля
+        // Fields
         let sc = it
             .secure_contents
             .get_or_insert_with(SecureContents::default);
         set_designated(&mut sc.fields, "username", "username", "T", &self.username);
         set_designated(&mut sc.fields, "password", "password", "P", &self.password);
 
-        // Адрес и домен
+        // URL and domain
         let url = self.url.trim().to_string();
         if url.is_empty() {
             sc.urls.clear();
@@ -1546,7 +1546,7 @@ impl EntryDraft {
             it.location_key = Some(host_of(self.url.trim()));
         }
 
-        // Заметки
+        // Notes
         let notes = self.notes.trim();
         if notes.is_empty() {
             sc.notes_plain = None;
@@ -1556,7 +1556,7 @@ impl EntryDraft {
     }
 }
 
-/// Ставит значение поля с пометкой `designation`.
+/// Sets the value of a `designation`-tagged field.
 fn set_designated(
     fields: &mut Vec<PifField>,
     designation: &str,
@@ -1584,7 +1584,7 @@ fn set_designated(
     });
 }
 
-/// Имя узла из адреса: `https://shop.example.com/a` → `shop.example.com`.
+/// Host name from the URL: `https://shop.example.com/a` → `shop.example.com`.
 fn host_of(url: &str) -> String {
     let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
     rest.split(['/', ':', '?', '#'])
@@ -1594,7 +1594,7 @@ fn host_of(url: &str) -> String {
         .to_string()
 }
 
-/// Текущее время в секундах Unix.
+/// Current time in Unix seconds.
 pub fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1602,10 +1602,10 @@ pub fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
-/// Новый uuid в формате 1PIF: 32 заглавные hex-символа без дефисов.
+/// A new uuid in 1PIF format: 32 uppercase hex characters, no dashes.
 pub fn new_uuid() -> String {
     let mut bytes = [0u8; 16];
-    // /dev/urandom есть на любой macOS-системе и не тянет зависимостей.
+    // /dev/urandom exists on every macOS system and pulls in no dependencies.
     if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
         use std::io::Read;
         let _ = f.read_exact(&mut bytes);
@@ -1613,36 +1613,36 @@ pub fn new_uuid() -> String {
     bytes.iter().map(|b| format!("{b:02X}")).collect()
 }
 
-/// Каталог корзины рядом с экспортом.
+/// The trash directory next to the export.
 pub const TRASH_DIR_NAME: &str = "trash";
 
-/// Сколько дней пролежавшему в корзине файлу можно жить.
+/// How many days a file may sit in the trash.
 ///
-/// Дальше приложение удаляет его сам. Раньше — нет: пока можно
-/// восстановить, пусть лежит.
+/// After that the app deletes it itself. Before that, no: as long as it
+/// can still be restored, let it lie there.
 pub const TRASH_MAX_AGE_DAYS: u64 = 30;
 
-/// Сколько секунд в сутках.
+/// Seconds in a day.
 const DAY: u64 = 86_400;
 
-/// Состояние корзины: сколько файлов и сколько места.
+/// Trash state: how many files and how much space.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TrashStats {
-    /// Число файлов.
+    /// Number of files.
     pub files: usize,
-    /// Суммарный размер в байтах.
+    /// Total size in bytes.
     pub bytes: u64,
 }
 
 impl Pif {
-    /// Каталог корзины для этого экспорта.
+    /// The trash directory for this export.
     pub fn trash_dir(&self) -> Option<PathBuf> {
         let pif_path = self.source_path.as_deref()?;
         let base = pif_path.parent()?;
         Some(base.join(TRASH_DIR_NAME))
     }
 
-    /// Что сейчас лежит в корзине.
+    /// What is in the trash right now.
     pub fn trash_stats(&self) -> TrashStats {
         let Some(dir) = self.trash_dir() else {
             return TrashStats::default();
@@ -1650,10 +1650,10 @@ impl Pif {
         collect_trash(&dir)
     }
 
-    /// Удаляет из корзины всё, что пролежало дольше срока.
+    /// Removes from the trash everything that has been there past the deadline.
     ///
-    /// Возвращает число удалённых файлов. Ошибки чтения каталога
-    /// игнорируются: нет корзины — нечего чистить.
+    /// Returns the number of removed files. Directory read errors are
+    /// ignored: no trash, nothing to clean.
     pub fn purge_trash(&self) -> usize {
         let Some(dir) = self.trash_dir() else {
             return 0;
@@ -1679,13 +1679,13 @@ impl Pif {
                     removed += 1;
                 }
             }
-            // Пустой каталог записи убираем, чтобы не плодить мусор.
+            // Drop an emptied record directory so we do not accumulate litter.
             let _ = std::fs::remove_dir(sub.path());
         }
         removed
     }
 
-    /// Очищает корзину полностью. Возвращает число удалённых файлов.
+    /// Empties the trash completely. Returns the number of removed files.
     pub fn empty_trash(&self) -> usize {
         let Some(dir) = self.trash_dir() else {
             return 0;
@@ -1699,7 +1699,7 @@ impl Pif {
     }
 }
 
-/// Считает содержимое корзины.
+/// Counts the trash contents.
 fn collect_trash(dir: &Path) -> TrashStats {
     let mut stats = TrashStats::default();
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -1719,11 +1719,11 @@ fn collect_trash(dir: &Path) -> TrashStats {
     stats
 }
 
-/// Переносит файл в корзину, сохраняя структуру `корзина/<uuid>/<имя>`.
+/// Moves a file to the trash, keeping the `trash/<uuid>/<name>` layout.
 ///
-/// Время изменения файла выставляется заново: у фотографии из выгрузки
-/// может быть mtime пятилетней давности, и такой файл улетел бы при
-/// первой же очистке, не побыв в корзине.
+/// The modification time is reset: a photo from a dump may carry an mtime
+/// from five years ago and would fly out on the very first cleanup
+/// without ever having spent time in the trash.
 fn move_to_trash(trash: &Path, uuid: &str, from: &Path) -> std::io::Result<PathBuf> {
     let dir = trash.join(uuid);
     std::fs::create_dir_all(&dir)?;
@@ -1743,7 +1743,7 @@ fn move_to_trash(trash: &Path, uuid: &str, from: &Path) -> std::io::Result<PathB
     match std::fs::rename(from, &target) {
         Ok(()) => {}
         Err(_) => {
-            // Файловая система может быть другой: копируем и убираем.
+            // The file system may be a different one: copy and remove instead.
             std::fs::copy(from, &target)?;
             std::fs::remove_file(from)?;
         }
@@ -1757,7 +1757,7 @@ fn move_to_trash(trash: &Path, uuid: &str, from: &Path) -> std::io::Result<PathB
     Ok(target)
 }
 
-/// Имя файла с номером, чтобы не затереть существующий: `photo.jpg` → `photo-1.jpg`.
+/// File name with a number, so an existing one is not overwritten: `photo.jpg` → `photo-1.jpg`.
 fn unique_name(name: &str, n: usize) -> String {
     let path = Path::new(name);
     let stem = path
@@ -1770,20 +1770,20 @@ fn unique_name(name: &str, n: usize) -> String {
     }
 }
 
-/// Сколько последних версий хранить рядом с файлом.
+/// How many recent versions to keep next to the file.
 pub const BACKUP_KEEP: usize = 5;
 
-/// Сдвигает резервные копии и делает новую.
+/// Shifts the backups and makes a new one.
 ///
-/// `data.1pif.bak1` — самая свежая копия, `.bak5` — самая старая из
-/// хранимых. Копии, которым за пределами `BACKUP_KEEP` мест, удаляются.
+/// `data.1pif.bak1` is the newest copy, `.bak5` the oldest of the kept
+/// ones. Copies beyond `BACKUP_KEEP` slots are deleted.
 fn rotate_backups(path: &Path) -> Result<(), PifError> {
     let err = |e: std::io::Error, p: &Path| PifError::Io {
         path: p.display().to_string(),
         source: e,
     };
 
-    // Сдвигаем от самой старой к самой свежей, чтобы не затереть.
+    // Shift from oldest to newest so nothing gets overwritten.
     for n in (1..BACKUP_KEEP).rev() {
         let from = backup_path(path, n);
         if from.exists() {
@@ -1797,18 +1797,18 @@ fn rotate_backups(path: &Path) -> Result<(), PifError> {
     Ok(())
 }
 
-/// Путь к резервной копии: `data.1pif.bak1`.
+/// Path to a backup copy: `data.1pif.bak1`.
 fn backup_path(path: &Path, n: usize) -> PathBuf {
     let mut s = path.as_os_str().to_os_string();
     s.push(format!(".bak{n}"));
     PathBuf::from(s)
 }
 ///
-/// 1Password раскладывает файлы по каталогам, имя каталога — это uuid
-/// записи без дефисов. Никакой ссылки на вложение в JSON нет, связь
-/// держится только на имени каталога, поэтому искать приходится так.
+/// 1Password lays the files out in directories, and a directory name is the
+/// record uuid without dashes. The JSON holds no reference to an attachment,
+/// the link is the directory name alone, hence this way of looking them up.
 ///
-/// Каталоги, не совпавшие ни с одной записью, игнорируются.
+/// Directories that match no record are ignored.
 fn scan_attachments(pif_path: &Path, items: &[PifItem]) -> HashMap<String, Vec<Attachment>> {
     let mut known: HashMap<String, &str> = HashMap::new();
     for it in items {
@@ -1863,7 +1863,7 @@ fn scan_attachments(pif_path: &Path, items: &[PifItem]) -> HashMap<String, Vec<A
     out
 }
 
-/// Размер файла для показа: `12 КБ`, `3 МБ`.
+/// A file size for display: `12 KB`, `3 MB`.
 pub fn human_size(bytes: u64) -> String {
     const KB: f64 = 1024.0;
     if bytes < 1024 {
@@ -1877,10 +1877,10 @@ pub fn human_size(bytes: u64) -> String {
     format!("{v:.1} MB")
 }
 
-/// Имя поля считается логином.
+/// A field name counts as a login.
 ///
-/// Русские варианты здесь не переводятся вместе с интерфейсом: это имена
-/// полей из файла выгрузки, а не надписи приложения.
+/// The Russian variants are deliberately not translated along with the UI:
+/// they are field names from the export file, not app labels.
 fn is_username_field(name: &Option<String>) -> bool {
     matches!(
         name.as_deref().unwrap_or("").to_lowercase().as_str(),
@@ -1888,30 +1888,30 @@ fn is_username_field(name: &Option<String>) -> bool {
     )
 }
 
-/// Ошибка разбора экспорта.
+/// An export parsing error.
 #[derive(Debug)]
 pub enum PifError {
-    /// Ошибка ввода-вывода.
+    /// I/O error.
     Io {
-        /// Путь к файлу.
+        /// Path to the file.
         path: String,
-        /// Исходная ошибка.
+        /// Underlying error.
         source: std::io::Error,
     },
-    /// Ошибка JSON.
+    /// JSON error.
     Json(serde_json::Error),
-    /// Ошибка JSON в конкретной строке.
+    /// JSON error on a specific line.
     Line {
-        /// Номер строки, начиная с 1.
+        /// Line number, 1-based.
         lineno: usize,
-        /// Исходная ошибка.
+        /// Underlying error.
         source: serde_json::Error,
     },
-    /// В файле не нашлось ни одной записи.
+    /// The file contained no records.
     Empty,
-    /// По пути уже лежит экспорт: затирать чужой файл мы не будем.
+    /// An export already exists at the path: we will not overwrite someone else's file.
     Exists {
-        /// Путь к файлу.
+        /// Path to the file.
         path: String,
     },
 }
@@ -1936,7 +1936,7 @@ impl std::error::Error for PifError {}
 mod tests {
     use super::*;
 
-    const SAMPLE: &str = r#"{"uuid":"A1","typeName":"webforms.WebForm","title":"GitHub","locationKey":"github.com","location":"https://github.com","secureContents":{"fields":[{"type":"T","name":"username","value":"me@example.com"},{"type":"P","name":"password","value":"secret123"}],"URLs":[{"url":"https://github.com"}],"notesPlain":"заметка"},"contentsHash":"1234abcd","securityLevel":"SL5"}
+    const SAMPLE: &str = r#"{"uuid":"A1","typeName":"webforms.WebForm","title":"GitHub","locationKey":"github.com","location":"https://github.com","secureContents":{"fields":[{"type":"T","name":"username","value":"me@example.com"},{"type":"P","name":"password","value":"secret123"}],"URLs":[{"url":"https://github.com"}],"notesPlain":"note"},"contentsHash":"1234abcd","securityLevel":"SL5"}
 ***5642bee8-a5ff-11dc-8314-0800200c9a66***
 {"uuid":"B2","typeName":"system.folder.Regular","title":"EMails"}
 {"uuid":"C3","typeName":"passwords.Password","title":"Mail account","secureContents":{"fields":[{"type":"P","value":"p@ss"}]}}"#;
@@ -1956,7 +1956,7 @@ mod tests {
         let gh = p.items.iter().find(|i| i.uuid == "A1").unwrap();
         assert_eq!(gh.primary_password(), Some("secret123"));
         assert_eq!(gh.usernames(), vec!["me@example.com"]);
-        assert_eq!(gh.notes(), Some("заметка"));
+        assert_eq!(gh.notes(), Some("note"));
         assert!(gh.urls().contains(&"https://github.com"));
     }
 
@@ -1966,10 +1966,10 @@ mod tests {
         assert_eq!(p.search("github").len(), 1);
         assert_eq!(p.search("GITHUB").len(), 1);
         assert_eq!(p.search("mail").len(), 1);
-        // Название вида записи не ищется: search смотрит только на название,
-        // адрес и поля записи.
+        // The record kind is not searched: search only looks at the title,
+        // the URL and the record's fields.
         assert_eq!(p.search("Passwords").len(), 0);
-        assert_eq!(p.search("нетакого").len(), 0);
+        assert_eq!(p.search("nosuchthing").len(), 0);
     }
 
     #[test]
@@ -1978,7 +1978,7 @@ mod tests {
             "***5642bee8-a5ff-11dc-8314-0800200c9a66***"
         ));
         assert!(!is_attachment_marker("{\"uuid\":\"x\"}"));
-        assert!(!is_attachment_marker("***не-hex***"));
+        assert!(!is_attachment_marker("***not-hex***"));
     }
 
     #[test]
@@ -1993,23 +1993,23 @@ mod tests {
         assert!(matches!(Pif::parse("   \n\n"), Err(PifError::Empty)));
     }
 
-    /// Новое хранилище сразу открывается: в нём лежит одна папка, которая в
-    /// списках не видна.
+    /// A new store opens right away: it holds one folder, which is invisible
+    /// in the lists.
     #[test]
-    fn новое_хранилище_сразу_открывается() {
+    fn new_store_opens_immediately() {
         let root = std::env::temp_dir().join(format!("pif-create-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
 
         let created = Pif::create(&root).unwrap();
-        assert!(root.join("data.1pif").exists(), "файл должен появиться");
-        assert!(root.join("attachments").is_dir(), "каталог вложений нужен");
+        assert!(root.join("data.1pif").exists(), "the file should appear");
+        assert!(root.join("attachments").is_dir(), "the attachments directory is needed");
 
-        // Папка не должна показываться пользователю.
-        assert!(created.alive().is_empty(), "живых записей пока нет");
-        assert_eq!(created.items.len(), 1, "внутри одна стартовая папка");
+        // The folder must not show up for the user.
+        assert!(created.alive().is_empty(), "no live records yet");
+        assert_eq!(created.items.len(), 1, "one starter folder inside");
         assert_eq!(created.items[0].type_name.as_deref(), Some(FOLDER_TYPE));
 
-        // Главное: файл должен пережить перезапуск приложения.
+        // The point: the file must survive an app restart.
         let reopened = Pif::from_file(root.join("data.1pif")).unwrap();
         assert!(reopened.alive().is_empty());
         assert_eq!(reopened.items.len(), 1);
@@ -2017,9 +2017,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Чужой экспорт не затирается.
+    /// A foreign export is not overwritten.
     #[test]
-    fn создание_не_затирает_существующий_файл() {
+    fn create_does_not_overwrite_an_existing_file() {
         let root = std::env::temp_dir().join(format!("pif-create-exists-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
@@ -2028,12 +2028,12 @@ mod tests {
         let err = Pif::create(&root).unwrap_err();
         assert!(
             matches!(err, PifError::Exists { .. }),
-            "ждём отказ, а не затирание"
+            "we expect a refusal, not an overwrite"
         );
         assert_eq!(
             std::fs::read_to_string(root.join("data.1pif")).unwrap(),
             " precious\n",
-            "содержимое чужого файла не должно меняться"
+            "another file's contents must not change"
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -2050,8 +2050,8 @@ mod tests {
 mod real_export_tests {
     use super::*;
 
-    /// Реальная запись `webforms.WebForm`: в ней несколько полей типа `P`,
-    /// и канонический пароль помечен `designation`.
+    /// A real `webforms.WebForm` record: it carries several `P` fields,
+    /// and the canonical password is tagged `designation`.
     #[test]
     fn webform_prefers_designated_password() {
         let raw = r#"{"uuid":"u1","typeName":"webforms.WebForm","title":"Banggood","locationKey":"banggood.com","secureContents":{"URLs":[{"url":"https://www.banggood.com"}],"fields":[{"name":"password","type":"P","value":"DECOY-FIRST"},{"name":"username","type":"T","value":""},{"name":"email","type":"T","value":"Enter email"},{"name":"email","type":"T","designation":"username","value":"me@example.com"},{"name":"password","type":"P","designation":"password","value":"REAL-SECRET"}]}}"#;
@@ -2063,7 +2063,7 @@ mod real_export_tests {
         assert_eq!(it.urls(), vec!["https://www.banggood.com"]);
     }
 
-    /// Реальная запись `passwords.Password`: поля нет, пароль — строкой.
+    /// A real `passwords.Password` record: no fields, the password as a string.
     #[test]
     fn password_item_reads_plain_password_field() {
         let raw = r#"{"uuid":"u2","typeName":"passwords.Password","title":"nocopyrightsounds.co.uk","locationKey":"nocopyrightsounds.co.uk","location":"http://nocopyrightsounds.co.uk/wp-login/","secureContents":{"password":"rg7qqLPhFTjQ"}}"#;
@@ -2075,7 +2075,7 @@ mod real_export_tests {
         assert_eq!(it.urls(), vec!["http://nocopyrightsounds.co.uk/wp-login/"]);
     }
 
-    /// Пустое имя записи в выгрузке встречается — это норма, не ошибка.
+    /// An empty record title occurs in dumps — that is normal, not an error.
     #[test]
     fn title_may_be_empty_string() {
         let raw = r#"{"uuid":"u3","typeName":"webforms.WebForm","title":"","secureContents":{}}"#;
@@ -2083,16 +2083,16 @@ mod real_export_tests {
         assert_eq!(p.items[0].title.as_deref(), Some(""));
     }
 
-    /// Заметка: текст лежит в `notesPlain`.
+    /// A note: the text lives in `notesPlain`.
     #[test]
     fn secure_note_reads_notes_plain() {
-        let raw = r#"{"uuid":"u4","typeName":"securenotes.SecureNote","title":"WM","secureContents":{"notesPlain":"переводы на карту"}}"#;
+        let raw = r#"{"uuid":"u4","typeName":"securenotes.SecureNote","title":"WM","secureContents":{"notesPlain":"transfers to card"}}"#;
         let p = Pif::parse(raw).unwrap();
-        assert_eq!(p.items[0].notes(), Some("переводы на карту"));
+        assert_eq!(p.items[0].notes(), Some("transfers to card"));
     }
 
-    /// Поле `password` и поле `secureContents.password` могут оба быть
-    /// пустыми — тогда пароля у записи нет.
+    /// Both the `password` field and `secureContents.password` can be empty,
+    /// and then the record simply has no password.
     #[test]
     fn no_password_returns_none() {
         let raw = r#"{"uuid":"u5","typeName":"wallet.computer.License","title":"X","secureContents":{"fields":[{"name":"owner","type":"T","value":"me"}],"password":""}}"#;
@@ -2105,12 +2105,12 @@ mod real_export_tests {
 mod wallet_tests {
     use super::*;
 
-    /// Реальная запись `wallet.financial.CreditCard`: данных нет в `fields`,
-    /// они лежат плоскими ключами и продублированы в секциях.
-    const CARD: &str = r#"{"uuid":"C1","typeName":"wallet.financial.CreditCard","title":"Кредитная карта","secureContents":{"cardholder":"Vitalii","ccnum":"5314451117033352","expiry_yy":"2016","expiry_mm":"9","type":"mc","cvv":"712","sections":[{"fields":[{"k":"string","n":"cardholder","v":"Vitalii","t":"Имя владельца карты"},{"k":"string","n":"A90930AA80B1461EA634F666DACB517C","v":"5314 4511 1703 3352 712","t":"CVV"}],"title":"","name":""}]}}"#;
+    /// A real `wallet.financial.CreditCard` record: none of the data is in `fields`,
+    /// it lives in flat keys and is duplicated in the sections.
+    const CARD: &str = r#"{"uuid":"C1","typeName":"wallet.financial.CreditCard","title":"Credit card","secureContents":{"cardholder":"Vitalii","ccnum":"5314451117033352","expiry_yy":"2016","expiry_mm":"9","type":"mc","cvv":"712","sections":[{"fields":[{"k":"string","n":"cardholder","v":"Vitalii","t":"Cardholder name"},{"k":"string","n":"A90930AA80B1461EA634F666DACB517C","v":"5314 4511 1703 3352 712","t":"CVV"}],"title":"","name":""}]}}"#;
 
     #[test]
-    fn карта_читается_по_плоским_ключам() {
+    fn card_is_read_from_flat_keys() {
         let p = Pif::parse(CARD).unwrap();
         let extras = p.items[0].extra_fields();
         let get = |name: &str| {
@@ -2126,7 +2126,7 @@ mod wallet_tests {
     }
 
     #[test]
-    fn секретные_поля_помечены() {
+    fn secret_fields_are_flagged() {
         let p = Pif::parse(CARD).unwrap();
         let extras = p.items[0].extra_fields();
         let secret = |name: &str| {
@@ -2136,28 +2136,28 @@ mod wallet_tests {
                 .map(|(_, _, s)| *s)
                 .unwrap_or(false)
         };
-        assert!(secret("Card Number"), "номер карты надо маскировать");
+        assert!(secret("Card Number"), "the card number must be masked");
         assert!(secret("Security Code"));
         assert!(secret("Cardholder"));
         assert!(!secret("Expiry Year"));
     }
 
     #[test]
-    fn внутренние_ключи_и_конфликты_не_показываются() {
+    fn internal_keys_and_conflicts_are_hidden() {
         let p = Pif::parse(CARD).unwrap();
         let extras = p.items[0].extra_fields();
-        // хеш-ключ и _conflict_1 отфильтрованы, значение не задвоилось
+        // the hash key and _conflict_1 are filtered out, the value did not double
         assert!(!extras.iter().any(|(l, _, _)| l.len() == 32));
         assert!(!extras
             .iter()
             .any(|(_, v, _)| v == "5314 4511 1703 3352 712"));
     }
 
-    /// Реальная запись `wallet.onlineservices.Email.v2`.
-    const MAIL: &str = r#"{"uuid":"M1","typeName":"wallet.onlineservices.Email.v2","title":"Почта","secureContents":{"pop_password":"pop-secret","pop_server":"pop.example.com","pop_port":"995","pop_type":"tls","smtp_server":"smtp.example.com","smtp_port":"587","sections":[{"fields":[{"k":"concealed","n":"pop_password","v":"pop-secret","t":"Пароль","a":{"guarded":"yes"}}],"title":"POP"}]}}"#;
+    /// A real `wallet.onlineservices.Email.v2` record.
+    const MAIL: &str = r#"{"uuid":"M1","typeName":"wallet.onlineservices.Email.v2","title":"Mail","secureContents":{"pop_password":"pop-secret","pop_server":"pop.example.com","pop_port":"995","pop_type":"tls","smtp_server":"smtp.example.com","smtp_port":"587","sections":[{"fields":[{"k":"concealed","n":"pop_password","v":"pop-secret","t":"Password","a":{"guarded":"yes"}}],"title":"POP"}]}}"#;
 
     #[test]
-    fn почта_читается() {
+    fn mail_is_read() {
         let p = Pif::parse(MAIL).unwrap();
         let extras = p.items[0].extra_fields();
         let get = |name: &str| {
@@ -2172,33 +2172,33 @@ mod wallet_tests {
         assert_eq!(get("SMTP Server").as_deref(), Some("smtp.example.com"));
     }
 
-    /// Логин сервера лежит плоским ключом, полей формы нет.
+    /// The server login lives in a flat key, with no form fields.
     #[test]
-    fn сервер_отдаёт_логин_из_плоского_ключа() {
+    fn server_yields_its_login_from_a_flat_key() {
         let raw = r#"{"uuid":"S1","typeName":"wallet.computer.UnixServer","title":"Server","secureContents":{"username":"root","password":"toor"}}"#;
         let p = Pif::parse(raw).unwrap();
         assert_eq!(p.items[0].usernames(), vec!["root"]);
         assert_eq!(p.items[0].primary_password(), Some("toor"));
     }
 
-    /// Веб-форма не должна обрастать полями кошелька.
+    /// A web form must not grow wallet fields.
     #[test]
-    fn веб_форма_не_даёт_лишних_полей() {
-        let raw = r#"{"uuid":"W1","typeName":"webforms.WebForm","title":"Сайт","secureContents":{"fields":[{"name":"username","type":"T","designation":"username","value":"me"},{"name":"password","type":"P","designation":"password","value":"pw"}]}}"#;
+    fn web_form_yields_no_extra_fields() {
+        let raw = r#"{"uuid":"W1","typeName":"webforms.WebForm","title":"Site","secureContents":{"fields":[{"name":"username","type":"T","designation":"username","value":"me"},{"name":"password","type":"P","designation":"password","value":"pw"}]}}"#;
         let p = Pif::parse(raw).unwrap();
         assert!(p.items[0].extra_fields().is_empty());
     }
 
-    /// Поля с `guarded` берутся из секций и считаются секретными.
+    /// `guarded` fields are taken from the sections and count as secret.
     #[test]
-    fn поле_из_секции_с_подписью() {
-        let raw = r#"{"uuid":"X1","typeName":"wallet.computer.License","title":"Лицензия","secureContents":{"sections":[{"fields":[{"k":"concealed","n":"unknown_thing","v":"секрет","t":"Ключ продукта","a":{"guarded":"yes"}}]}]}}"#;
+    fn field_from_a_section_with_a_label() {
+        let raw = r#"{"uuid":"X1","typeName":"wallet.computer.License","title":"License","secureContents":{"sections":[{"fields":[{"k":"concealed","n":"unknown_thing","v":"secret","t":"Product key","a":{"guarded":"yes"}}]}]}}"#;
         let p = Pif::parse(raw).unwrap();
         let extras = p.items[0].extra_fields();
         assert_eq!(extras.len(), 1);
-        assert_eq!(extras[0].0, "Ключ продукта");
-        assert_eq!(extras[0].1, "секрет");
-        assert!(extras[0].2, "guarded должен означать секрет");
+        assert_eq!(extras[0].0, "Product key");
+        assert_eq!(extras[0].1, "secret");
+        assert!(extras[0].2, "guarded must mean secret");
     }
 }
 
@@ -2206,15 +2206,15 @@ mod wallet_tests {
 mod attachment_tests {
     use super::*;
 
-    /// Собирает экспорт во временном каталоге: data.1pif + attachments/.
+    /// Builds an export in a temp directory: data.1pif + attachments/.
     fn build(
         tag: &str,
         item_uuid: &str,
         att_dir: Option<&str>,
         files: &[(&str, &[u8])],
     ) -> PathBuf {
-        // Каталог должен быть свой у каждого теста: cargo запускает их
-        // параллельно в одном процессе, pid у всех общий.
+        // Each test needs its own directory: cargo runs them in parallel
+        // inside one process, so the pid is shared.
         let root = std::env::temp_dir().join(format!("opclient-att-{tag}-{item_uuid}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
@@ -2233,7 +2233,7 @@ mod attachment_tests {
     }
 
     #[test]
-    fn вложения_привязываются_по_имени_каталога() {
+    fn attachments_bind_by_directory_name() {
         let path = build(
             "link",
             "AAAA1111BBBB2222CCCC3333DDDD4444",
@@ -2246,7 +2246,7 @@ mod attachment_tests {
             .get("AAAA1111BBBB2222CCCC3333DDDD4444")
             .unwrap();
 
-        assert_eq!(files.len(), 2, "оба файла должны нашлись");
+        assert_eq!(files.len(), 2, "both files should be found");
         assert_eq!(files[0].name, "IMG_1.JPG");
         assert_eq!(files[1].name, "doc.pdf");
         assert_eq!(files[0].size, 10);
@@ -2255,11 +2255,11 @@ mod attachment_tests {
     }
 
     #[test]
-    fn чужой_каталог_вложений_игнорируется() {
+    fn a_foreign_attachment_directory_is_ignored() {
         let path = build(
             "foreign",
             "AAAA1111BBBB2222CCCC3333DDDD4444",
-            Some("НЕ-НАШ"),
+            Some("NOT-OURS"),
             &[],
         );
         let pif = Pif::from_file(&path).unwrap();
@@ -2268,7 +2268,7 @@ mod attachment_tests {
     }
 
     #[test]
-    fn без_каталога_вложений_всё_равно_читается() {
+    fn without_an_attachment_directory_it_still_reads() {
         let path = build("none", "AAAA1111BBBB2222CCCC3333DDDD4444", None, &[]);
         let pif = Pif::from_file(&path).unwrap();
         assert_eq!(pif.items.len(), 1);
@@ -2277,7 +2277,7 @@ mod attachment_tests {
     }
 
     #[test]
-    fn разделитель_записей_не_считается_вложением() {
+    fn a_record_separator_is_not_an_attachment() {
         let text = "{\"uuid\":\"U1\",\"typeName\":\"securenotes.SecureNote\",\"title\":\"A\",\"secureContents\":{}}\n***5642bee8-a5ff-11dc-8314-0800200c9a66***\n";
         let pif = Pif::parse(text).unwrap();
         assert_eq!(pif.record_separators, 1);
@@ -2285,7 +2285,7 @@ mod attachment_tests {
     }
 
     #[test]
-    fn размер_человекочитаемый() {
+    fn size_is_human_readable() {
         assert_eq!(human_size(500), "500 B");
         assert_eq!(human_size(2048), "2 KB");
         assert_eq!(human_size(5 * 1024 * 1024), "5.0 MB");
@@ -2296,7 +2296,7 @@ mod attachment_tests {
 mod roundtrip_tests {
     use super::*;
 
-    /// Настоящий экспорт, если он лежит рядом с workspace.
+    /// A real export, if it sits next to the workspace.
     fn real_export() -> Option<PathBuf> {
         let p = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../golden")
@@ -2310,11 +2310,11 @@ mod roundtrip_tests {
         dst
     }
 
-    /// Главная гарантия: чтение и немедленная запись дают тот же файл.
+    /// The main guarantee: reading and immediately writing yields the same file.
     #[test]
-    fn чтение_и_запись_совпадают_побайтово() {
+    fn read_and_write_match_byte_for_byte() {
         let Some(src) = real_export() else {
-            eprintln!("реальный экспорт не найден — проверка пропущена");
+            eprintln!("real export not found — check skipped");
             return;
         };
         let before = std::fs::read(&src).unwrap();
@@ -2328,18 +2328,18 @@ mod roundtrip_tests {
         assert_eq!(
             before.len(),
             after.len(),
-            "размер изменился: было {}, стало {}",
+            "size changed: was {}, became {}",
             before.len(),
             after.len()
         );
-        assert_eq!(before, after, "файл изменился при чтении и записи");
+        assert_eq!(before, after, "the file changed on read and write");
 
         let _ = std::fs::remove_file(&work);
     }
 
-    /// Правка одной записи не должна портить остальные.
+    /// Editing one record must not damage the others.
     #[test]
-    fn правка_одной_записи_не_трогает_остальные() {
+    fn editing_one_record_leaves_the_others_alone() {
         let Some(src) = real_export() else {
             return;
         };
@@ -2349,25 +2349,25 @@ mod roundtrip_tests {
         let untouched: Vec<String> = pif.items.iter().map(|i| i.raw.clone()).collect();
 
         let target = pif.items[3].uuid.clone();
-        pif.items[3].title = Some("ПРОВЕРКА".into());
+        pif.items[3].title = Some("CHECK".into());
         pif.touch(&target);
         assert!(pif.has_changes());
         pif.save(&work).unwrap();
 
         let again = Pif::from_file(&work).unwrap();
-        assert_eq!(again.items[3].title.as_deref(), Some("ПРОВЕРКА"));
+        assert_eq!(again.items[3].title.as_deref(), Some("CHECK"));
         let changed: Vec<usize> = (0..again.items.len())
             .filter(|&i| again.items[i].raw != untouched[i])
             .collect();
-        assert_eq!(changed, vec![3], "измениться должна ровно одна запись");
+        assert_eq!(changed, vec![3], "exactly one record should change");
         assert!(!again.has_changes());
 
         let _ = std::fs::remove_file(&work);
     }
 
-    /// Резервные копии сдвигаются и не копятся бесконечно.
+    /// Backups shift along instead of piling up forever.
     #[test]
-    fn ротация_хранит_пять_копий() {
+    fn rotation_keeps_five_copies() {
         let Some(src) = real_export() else {
             return;
         };
@@ -2375,7 +2375,7 @@ mod roundtrip_tests {
         let mut pif = Pif::from_file(&work).unwrap();
 
         for i in 0..(BACKUP_KEEP + 3) {
-            pif.items[3].title = Some(format!("правка {i}"));
+            pif.items[3].title = Some(format!("edit {i}"));
             pif.touch(&pif.items[3].uuid.clone());
             pif.save(&work).unwrap();
         }
@@ -2383,12 +2383,12 @@ mod roundtrip_tests {
         for n in 1..=BACKUP_KEEP {
             assert!(
                 backup_path(&work, n).exists(),
-                "копия .bak{n} должна существовать"
+                "the .bak{n} copy should exist"
             );
         }
         assert!(
             !backup_path(&work, BACKUP_KEEP + 1).exists(),
-            "шестой копии быть не должно"
+            "there should be no sixth copy"
         );
 
         let _ = std::fs::remove_file(&work);
@@ -2397,9 +2397,9 @@ mod roundtrip_tests {
         }
     }
 
-    /// Бэкап — это предыдущее состояние файла.
+    /// A backup is the previous state of the file.
     #[test]
-    fn бэкап_хранит_предыдущую_версию() {
+    fn backup_holds_the_previous_version() {
         let Some(src) = real_export() else {
             return;
         };
@@ -2407,12 +2407,12 @@ mod roundtrip_tests {
         let original = std::fs::read(&work).unwrap();
 
         let mut pif = Pif::from_file(&work).unwrap();
-        pif.items[3].title = Some("ПРОВЕРКА".into());
+        pif.items[3].title = Some("CHECK".into());
         pif.touch(&pif.items[3].uuid.clone());
         pif.save(&work).unwrap();
 
         let bak = std::fs::read(backup_path(&work, 1)).unwrap();
-        assert_eq!(bak, original, "в бэкапе должен лежать исходный файл");
+        assert_eq!(bak, original, "the backup should hold the original file");
 
         let _ = std::fs::remove_file(&work);
         let _ = std::fs::remove_file(backup_path(&work, 1));
@@ -2429,15 +2429,15 @@ mod crud_tests {
             username: "me@example.com".into(),
             password: "s3cret-pass".into(),
             url: "https://github.com/login".into(),
-            notes: "рабочий аккаунт".into(),
+            notes: "work account".into(),
             extra_a: String::new(),
             extra_b: String::new(),
         }
     }
 
     #[test]
-    fn новая_запись_читается_как_логин() {
-        assert!(Pif::parse("").is_err(), "пустой файл не должен разбираться");
+    fn a_new_item_reads_back_as_a_login() {
+        assert!(Pif::parse("").is_err(), "an empty file must not parse");
         let mut pif = Pif::parse(
             "{\"uuid\":\"U1\",\"typeName\":\"securenotes.SecureNote\",\"title\":\"A\",\"secureContents\":{}}\n",
         )
@@ -2451,12 +2451,12 @@ mod crud_tests {
         assert_eq!(it.primary_password(), Some("s3cret-pass"));
         assert_eq!(it.location.as_deref(), Some("https://github.com/login"));
         assert_eq!(it.location_key.as_deref(), Some("github.com"));
-        assert_eq!(it.notes(), Some("рабочий аккаунт"));
+        assert_eq!(it.notes(), Some("work account"));
         assert!(it.dirty);
     }
 
     #[test]
-    fn uuid_уникален_и_выглядит_как_в_экспорте() {
+    fn uuid_is_unique_and_looks_like_the_export() {
         let mut pif = Pif::parse(
             "{\"uuid\":\"U1\",\"typeName\":\"securenotes.SecureNote\",\"title\":\"A\",\"secureContents\":{}}\n",
         )
@@ -2471,29 +2471,29 @@ mod crud_tests {
     }
 
     #[test]
-    fn правка_меняет_только_своё() {
+    fn an_edit_only_changes_its_own() {
         let mut pif = Pif::parse(
-            "{\"uuid\":\"U1\",\"typeName\":\"securenotes.SecureNote\",\"title\":\"A\",\"secureContents\":{\"notesPlain\":\"старое\"}}\n",
+            "{\"uuid\":\"U1\",\"typeName\":\"securenotes.SecureNote\",\"title\":\"A\",\"secureContents\":{\"notesPlain\":\"old\"}}\n",
         )
         .unwrap();
         let uuid = pif.create_login(&draft());
         pif.mark_saved();
 
         let mut d = EntryDraft::from_item(pif.find(&uuid).unwrap());
-        d.password = "новый-пароль".into();
+        d.password = "new-password".into();
         d.apply(pif.find_mut(&uuid).unwrap());
         pif.touch(&uuid);
 
         let it = pif.find(&uuid).unwrap();
-        assert_eq!(it.primary_password(), Some("новый-пароль"));
+        assert_eq!(it.primary_password(), Some("new-password"));
         assert_eq!(
             it.usernames(),
             vec!["me@example.com"],
-            "логин не должен слететь"
+            "the login must not get lost"
         );
-        // чужая запись не тронута
-        assert_eq!(pif.find("U1").unwrap().notes(), Some("старое"));
-        // поля не задваиваются при повторной правке
+        // the other record is untouched
+        assert_eq!(pif.find("U1").unwrap().notes(), Some("old"));
+        // fields do not double up on a repeat edit
         let passes = it
             .secure_contents
             .as_ref()
@@ -2502,11 +2502,11 @@ mod crud_tests {
             .iter()
             .filter(|f| f.designation.as_deref() == Some("password"))
             .count();
-        assert_eq!(passes, 1, "поле пароля должно остаться одно");
+        assert_eq!(passes, 1, "the password field must stay single");
     }
 
     #[test]
-    fn очистка_поля_убирает_его() {
+    fn clearing_a_field_removes_it() {
         let mut pif = Pif::parse(
             "{\"uuid\":\"U1\",\"typeName\":\"securenotes.SecureNote\",\"title\":\"A\",\"secureContents\":{}}\n",
         )
@@ -2523,20 +2523,20 @@ mod crud_tests {
     }
 
     #[test]
-    fn удаление_убирает_запись() {
+    fn removal_drops_the_record() {
         let mut pif = Pif::parse(
             "{\"uuid\":\"U1\",\"typeName\":\"securenotes.SecureNote\",\"title\":\"A\",\"secureContents\":{}}\n{\"uuid\":\"U2\",\"typeName\":\"securenotes.SecureNote\",\"title\":\"B\",\"secureContents\":{}}\n",
         )
         .unwrap();
         assert!(pif.remove("U2"));
-        assert!(!pif.remove("НЕТ-ТАКОЙ"));
+        assert!(!pif.remove("NO-SUCH"));
         assert_eq!(pif.items.len(), 1);
         assert!(pif.find("U2").is_none());
     }
 
-    /// Полный путь: создать, сохранить в файл, перечитать, удалить.
+    /// The full path: create, save to a file, read back, delete.
     #[test]
-    fn полный_путь_через_файл() {
+    fn full_path_through_a_file() {
         let dir = std::env::temp_dir().join(format!("opclient-crud-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2555,7 +2555,7 @@ mod crud_tests {
         assert!(!again.has_changes());
         let it = again
             .find(&uuid)
-            .expect("запись должна пережить сохранение");
+            .expect("the record must survive a save");
         assert_eq!(it.primary_password(), Some("s3cret-pass"));
         assert_eq!(it.usernames(), vec!["me@example.com"]);
 
@@ -2565,17 +2565,17 @@ mod crud_tests {
         assert!(third.find(&uuid).is_none());
         assert_eq!(third.items.len(), 1);
 
-        // после всех сохранений файл не разъехался
+        // after all the saves the file has not fallen apart
         let text = std::fs::read_to_string(&file).unwrap();
         let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
-        assert_eq!(lines.len(), 2, "должны остаться запись и разделитель");
+        assert_eq!(lines.len(), 2, "the record and the separator should remain");
         assert!(lines[1].starts_with("***"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn домен_берётся_из_адреса() {
+    fn the_host_is_taken_from_the_url() {
         assert_eq!(
             host_of("https://shop.example.com/a?b=1"),
             "shop.example.com"
@@ -2589,7 +2589,7 @@ mod crud_tests {
 mod attachment_delete_tests {
     use super::*;
 
-    /// Экспорт с одной картинкой, готовый к проверке удаления.
+    /// An export with one image, ready for the delete checks.
     fn export(tag: &str) -> (PathBuf, PathBuf) {
         let root = std::env::temp_dir().join(format!("opclient-del-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -2603,7 +2603,7 @@ mod attachment_delete_tests {
         (file, root)
     }
 
-    /// Внешний файл-картинка, который пользователь прикрепит.
+    /// The external image file the user will attach.
     fn source_image(tag: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!("opclient-src-{tag}.png"));
         std::fs::write(&p, b"\x89PNG\r\n\x1a\n fake image bytes").unwrap();
@@ -2611,7 +2611,7 @@ mod attachment_delete_tests {
     }
 
     #[test]
-    fn удаление_записи_уносит_файл_вложения() {
+    fn removing_a_record_carries_its_attachment_away() {
         let (file, root) = export("carry");
         let src = source_image("carry");
 
@@ -2623,28 +2623,28 @@ mod attachment_delete_tests {
         let att_path = pif.attachments_of(&uuid)[0].path.clone();
         assert!(
             att_path.exists(),
-            "после сохранения файл должен лежать в экспорте"
+            "after the save the file should be in the export"
         );
         let record_gone_after = pif.attachments_of(&uuid).len();
         assert_eq!(record_gone_after, 1);
 
-        // Удаляем запись и сохраняем.
+        // Remove the record and save.
         assert!(pif.remove(&uuid));
         pif.save(&file).unwrap();
 
         assert!(
             !att_path.exists(),
-            "вложение удалено вместе с записью — отменять это нельзя"
+            "the attachment went with the record — this cannot be undone"
         );
 
         let _ = std::fs::remove_file(&src);
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Отмена удаления не должна трогать диск: файл удаляется только при
-    /// сохранении, а не в момент нажатия.
+    /// Undoing a delete must not touch the disk: the file is removed only
+    /// on save, not at the moment of the click.
     #[test]
-    fn до_сохранения_файл_на_месте() {
+    fn before_a_save_the_file_is_still_there() {
         let (file, root) = export("pending");
         let src = source_image("pending");
 
@@ -2655,19 +2655,19 @@ mod attachment_delete_tests {
         let att = pif.attachments_of(&uuid)[0].path.clone();
 
         pif.remove(&uuid);
-        assert!(att.exists(), "до сохранения файл обязан остаться на диске");
+        assert!(att.exists(), "before the save the file must stay on disk");
         assert!(
             pif.attachments_changed(),
-            "изменение должно быть отложенным"
+            "the change should be deferred"
         );
 
         let _ = std::fs::remove_file(&src);
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Открепление отдельного файла не трогает остальные.
+    /// Detaching one file leaves the others alone.
     #[test]
-    fn открепление_удаляет_только_выбранный_файл() {
+    fn detach_removes_only_the_chosen_file() {
         let (file, root) = export("one");
         let a = source_image("one-a");
         let b = std::env::temp_dir().join("opclient-src-one-b.txt");
@@ -2698,17 +2698,17 @@ mod attachment_delete_tests {
         assert!(pif.detach(&uuid, &png.file_name().unwrap().to_string_lossy()));
         pif.save(&file).unwrap();
 
-        assert!(!png.exists(), "откреплённый файл удалён");
-        assert!(txt.exists(), "остальные вложения не тронуты");
+        assert!(!png.exists(), "the detached file is deleted");
+        assert!(txt.exists(), "the other attachments are untouched");
 
         let _ = std::fs::remove_file(&a);
         let _ = std::fs::remove_file(&b);
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Одинаковые имена не затирают друг друга.
+    /// Identical names do not overwrite each other.
     #[test]
-    fn одинаковые_имена_не_затираются() {
+    fn identical_names_do_not_overwrite() {
         let (file, root) = export("dup");
         let a = std::env::temp_dir().join("opclient-dup-1.png");
         let b = std::env::temp_dir().join("opclient-dup-2.png");
@@ -2719,7 +2719,7 @@ mod attachment_delete_tests {
         let uuid = pif.create_login(&EntryDraft::default());
         let first = pif.attach(&uuid, &a).unwrap();
         let second = pif.attach(&uuid, &b).unwrap();
-        assert_ne!(first.name, second.name, "имена должны различаться");
+        assert_ne!(first.name, second.name, "the names should differ");
         assert_eq!(second.name, "opclient-dup-2.png");
         assert_eq!(first.name, "opclient-dup-1.png");
 
@@ -2748,9 +2748,9 @@ mod attachment_delete_tests {
         Pif::parse(text).unwrap()
     }
 
-    /// Папки видны, записи внутри них считаются, но в списке записей их нет.
+    /// Folders are visible and their records counted, but they are not in the entry list.
     #[test]
-    fn папки_отделены_от_записей() {
+    fn folders_are_separate_from_entries() {
         let pif = pif_of(
             &[
                 folder_doc("F1", "Work"),
@@ -2763,47 +2763,47 @@ mod attachment_delete_tests {
         assert_eq!(pif.folders().len(), 1);
         assert_eq!(pif.folders()[0].title.as_deref(), Some("Work"));
 
-        // В общем списке записей папки быть не должно.
+        // No folder should show up in the entry list.
         assert_eq!(pif.alive().len(), 2);
         assert!(pif.alive().iter().all(|i| i.uuid != "F1"));
 
-        assert_eq!(pif.folder_count("F1"), 1, "в папке одна запись");
-        assert_eq!(pif.folder_count("F2"), 0, "несуществующей папки ноль");
+        assert_eq!(pif.folder_count("F1"), 1, "one record in the folder");
+        assert_eq!(pif.folder_count("F2"), 0, "zero for a folder that does not exist");
         assert!(pif.folder("F1").is_some());
-        assert!(pif.folder("U1").is_none(), "запись не папка");
+        assert!(pif.folder("U1").is_none(), "a record is not a folder");
     }
 
-    /// Создание, переименование и удаление папки.
+    /// Creating, renaming and deleting a folder.
     #[test]
-    fn папку_можно_создать_переименовать_и_удалить() {
+    fn a_folder_can_be_created_renamed_and_deleted() {
         let mut pif = pif_of(&login_doc("U1", "GitHub", None));
 
         let uuid = pif.create_folder("  Work  ");
         assert_eq!(pif.folder(&uuid).unwrap().title.as_deref(), Some("Work"));
         assert!(
             pif.folder(&uuid).unwrap().dirty,
-            "новая папка должна переписываться"
+            "a new folder should be rewritten"
         );
 
         assert!(pif.rename_folder(&uuid, " Office "));
         assert_eq!(pif.folder(&uuid).unwrap().title.as_deref(), Some("Office"));
         assert!(
-            !pif.rename_folder("нет-такой", "x"),
-            "нет папки — нет правки"
+            !pif.rename_folder("no-such", "x"),
+            "no folder, no edit"
         );
 
-        // Удаление папки не должно уносить её содержимое.
+        // Deleting a folder must not take its contents with it.
         assert!(pif.set_folder("U1", Some(&uuid)));
         assert!(pif.remove_folder(&uuid));
         assert!(pif.folder(&uuid).is_none());
-        assert_eq!(pif.alive().len(), 1, "запись осталась на месте");
-        assert_eq!(pif.find("U1").unwrap().folder_uuid, None, "ссылка снята");
-        assert!(!pif.remove_folder(&uuid), "повторно удалить нельзя");
+        assert_eq!(pif.alive().len(), 1, "the record stayed put");
+        assert_eq!(pif.find("U1").unwrap().folder_uuid, None, "the link is dropped");
+        assert!(!pif.remove_folder(&uuid), "cannot delete twice");
     }
 
-    /// Удалённая запись не попадает в счётчик папки.
+    /// A trashed record does not count towards the folder.
     #[test]
-    fn удалённая_запись_не_считается_в_папке() {
+    fn a_trashed_record_is_not_counted_in_the_folder() {
         let pif = pif_of(&[
             folder_doc("F1", "Work"),
             login_doc("U1", "GitHub", Some("F1")),
@@ -2811,13 +2811,13 @@ mod attachment_delete_tests {
         ]
         .join("\n"));
 
-        assert_eq!(pif.folder_count("F1"), 1, "удалённая не в счётчике");
+        assert_eq!(pif.folder_count("F1"), 1, "the trashed one is not counted");
         assert_eq!(pif.trashed().len(), 1);
     }
 
-    /// Пустое имя папки заменяется заготовкой, а пробелы срезаются.
+    /// An empty folder name is replaced by a placeholder, and whitespace is trimmed.
     #[test]
-    fn пустое_имя_папки_заменяется_заготовкой() {
+    fn an_empty_folder_name_is_replaced_by_a_placeholder() {
         let mut pif = pif_of(&login_doc("U1", "GitHub", None));
         let uuid = pif.create_folder("   ");
         assert_eq!(
@@ -2826,25 +2826,25 @@ mod attachment_delete_tests {
         );
     }
 
-    /// Привязка к несуществующей папке и к самой папке — вхолостую.
+    /// Binding to a nonexistent folder, and to the folder itself, is a no-op.
     #[test]
-    fn нельзя_привязать_запись_к_несуществующей_папке() {
+    fn an_entry_cannot_be_bound_to_a_nonexistent_folder() {
         let mut pif =
             pif_of(&[folder_doc("F1", "Work"), login_doc("U1", "GitHub", None)].join("\n"));
 
-        // Поле можно поставить в любую строку, это не проверяется: 1Password
-        // при открытии сама раздаст записи по папкам.
+        // The field may be set to any string, and that is not checked:
+        // 1Password sorts the records into folders when it opens the file.
         assert!(pif.set_folder("U1", Some("F1")));
         assert_eq!(pif.find("U1").unwrap().folder_uuid.as_deref(), Some("F1"));
 
-        // Папку нельзя положить в папку.
+        // A folder cannot go into a folder.
         assert!(!pif.set_folder("F1", Some("F1")));
-        assert!(!pif.set_folder("нет-такой", Some("F1")));
+        assert!(!pif.set_folder("no-such", Some("F1")));
     }
 
-    /// Папки переживают сохранение и повторное открытие файла.
+    /// Folders survive a save and a reopen of the file.
     #[test]
-    fn папки_переживают_сохранение() {
+    fn folders_survive_a_save() {
         let dir = std::env::temp_dir().join(format!("pif-folder-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2869,11 +2869,11 @@ mod attachment_delete_tests {
 
     fn draft_of() -> EntryDraft {
         EntryDraft {
-            title: "Тест".into(),
+            title: "Test".into(),
             username: "user@example.com".into(),
             password: "secret42".into(),
             url: "example.com".into(),
-            notes: "заметка".into(),
+            notes: "note".into(),
             extra_a: "09/2027".into(),
             extra_b: "123".into(),
         }
@@ -2881,7 +2881,7 @@ mod attachment_delete_tests {
 
     fn created(kind: ItemKind) -> PifItem {
         let mut pif = Pif::parse("").unwrap_or_else(|_| {
-            // Пустой разбор не проходит, поэтому берём заготовку.
+            // Parsing an empty string fails, so take the stub.
             Pif::parse("{}\n").unwrap()
         });
         let uuid = pif.create_item(&draft_of(), kind);
@@ -2889,7 +2889,7 @@ mod attachment_delete_tests {
     }
 
     #[test]
-    fn тип_записи_пишется_в_type_name() {
+    fn the_item_kind_is_written_to_type_name() {
         for kind in ItemKind::all() {
             let item = created(kind);
             assert_eq!(item.type_name.as_deref(), Some(kind.type_name()));
@@ -2897,7 +2897,7 @@ mod attachment_delete_tests {
     }
 
     #[test]
-    fn логин_пишется_через_designation() {
+    fn the_login_is_written_via_designation() {
         let item = created(ItemKind::Login);
         let sc = item.secure_contents.as_ref().unwrap();
         assert!(sc
@@ -2911,7 +2911,7 @@ mod attachment_delete_tests {
     }
 
     #[test]
-    fn заметка_хранится_в_заметках() {
+    fn a_note_is_stored_in_the_notes() {
         let item = created(ItemKind::SecureNote);
         assert_eq!(
             item.secure_contents
@@ -2919,13 +2919,13 @@ mod attachment_delete_tests {
                 .unwrap()
                 .notes_plain
                 .as_deref(),
-            Some("заметка")
+            Some("note")
         );
         assert!(item.secure_contents.as_ref().unwrap().extra.is_empty());
     }
 
     #[test]
-    fn карта_пишет_номер_срок_и_код() {
+    fn a_card_writes_number_expiry_and_code() {
         let item = created(ItemKind::CreditCard);
         let extra = &item.secure_contents.as_ref().unwrap().extra;
         assert_eq!(
@@ -2934,14 +2934,14 @@ mod attachment_delete_tests {
         );
         assert_eq!(extra.get("ccnum"), Some(&serde_json::json!("secret42")));
         assert_eq!(extra.get("expiry_mm"), Some(&serde_json::json!("09")));
-        // Год разворачивается в четыре цифры: иначе при импорте 27 может
-        // прочитаться как 1927-й год.
+        // The year expands to four digits: otherwise 27 could be read on
+        // import as the year 1927.
         assert_eq!(extra.get("expiry_yy"), Some(&serde_json::json!("2027")));
         assert_eq!(extra.get("cvv"), Some(&serde_json::json!("123")));
     }
 
     #[test]
-    fn почта_пишет_smtp_и_pop() {
+    fn mail_writes_smtp_and_pop() {
         let item = created(ItemKind::EmailAccount);
         let extra = &item.secure_contents.as_ref().unwrap().extra;
         assert_eq!(
@@ -2956,7 +2956,7 @@ mod attachment_delete_tests {
     }
 
     #[test]
-    fn сервер_и_лицензия_пишут_свои_ключи() {
+    fn the_server_and_the_licence_write_their_own_keys() {
         let server = created(ItemKind::Server);
         let se = &server.secure_contents.as_ref().unwrap().extra;
         assert_eq!(
@@ -2972,7 +2972,7 @@ mod attachment_delete_tests {
     }
 
     #[test]
-    fn паспорт_и_документ_пишут_номер() {
+    fn the_passport_and_the_identity_write_the_number() {
         let passport = created(ItemKind::Passport);
         assert_eq!(
             passport
@@ -2995,11 +2995,11 @@ mod attachment_delete_tests {
         );
     }
 
-    /// Пустые поля в файл не попадают: незаполненного поля в выгрузке нет.
+    /// Empty fields never reach the file: a dump has no unfilled field.
     #[test]
-    fn пустые_поля_не_пишутся() {
+    fn empty_fields_are_not_written() {
         let draft = EntryDraft {
-            title: "Пусто".into(),
+            title: "Empty".into(),
             ..draft_of()
         };
         let mut pif = Pif::parse("{}\n").unwrap();
@@ -3020,19 +3020,19 @@ mod attachment_delete_tests {
     }
 
     #[test]
-    fn срок_разбирается_из_двух_и_четырёх_значного_года() {
+    fn expiry_parses_from_two_and_four_digit_years() {
         assert_eq!(
             split_expiry("09/2027"),
             ("09".to_string(), "2027".to_string())
         );
         assert_eq!(split_expiry("9/27"), ("9".to_string(), "2027".to_string()));
         assert_eq!(split_expiry(""), (String::new(), String::new()));
-        assert_eq!(split_expiry("нет слеша"), (String::new(), String::new()));
+        assert_eq!(split_expiry("no slash"), (String::new(), String::new()));
     }
 
-    /// Новая запись любого типа переживает сохранение и повторное чтение.
+    /// A new record of any type survives a save and a re-read.
     #[test]
-    fn записи_всех_типов_переживают_сохранение() {
+    fn records_of_all_kinds_survive_a_save() {
         let dir = std::env::temp_dir().join(format!("pif-kinds-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -3053,28 +3053,28 @@ mod attachment_delete_tests {
             assert_eq!(
                 found.count(),
                 1,
-                "запись типа {kind:?} не пережила сохранение"
+                "a record of kind {kind:?} did not survive the save"
             );
         }
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// У каждого типа подписи полей есть, и пустых среди них нет лишних.
+    /// Every kind has field labels, and none of the empties are pointless.
     #[test]
-    fn подписи_полей_у_каждого_типа() {
+    fn every_kind_has_field_labels() {
         for kind in ItemKind::all() {
             assert!(!kind.label().is_empty());
             let labels = kind.field_labels();
             assert!(
                 labels.iter().any(|l| !l.is_empty()),
-                "у {kind:?} не подписано ни одного поля"
+                "{kind:?} has no labelled field at all"
             );
             for (slot, label) in labels.iter().enumerate() {
                 let trimmed = label.trim();
                 assert!(
                     trimmed.is_empty() || trimmed.len() <= 24,
-                    "подпись поля слота {slot} у {kind:?} неуместно длинная: {trimmed}"
+                    "the field label for slot {slot} of {kind:?} is unacceptably long: {trimmed}"
                 );
             }
         }
@@ -3083,8 +3083,8 @@ mod attachment_delete_tests {
 
 #[cfg(test)]
 mod tests_common_unique {
-    /// Каталог, уникальный для каждого вызова: тесты идут параллельно,
-    /// а pid у них общий.
+    /// A directory unique to each call: tests run in parallel and
+    /// share the pid.
     pub fn uniq(tag: &str) -> std::path::PathBuf {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static N: AtomicUsize = AtomicUsize::new(0);
@@ -3097,7 +3097,7 @@ mod tests_common_unique {
 mod trash_tests {
     use super::*;
 
-    /// Экспорт с одной записью и внешним файлом-картинкой.
+    /// An export with one record and an external image file.
     fn fixture(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
         let root = tests_common_unique::uniq(tag);
         std::fs::create_dir_all(&root).unwrap();
@@ -3112,7 +3112,7 @@ mod trash_tests {
         (file, root, src)
     }
 
-    /// Старый файл: давно снятая фотография в mtime.
+    /// An old file: a photo taken long ago, down in its mtime.
     fn backdate(path: &Path, days: u64) {
         let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
         let when = std::time::SystemTime::now() - std::time::Duration::from_secs(days * DAY);
@@ -3121,7 +3121,7 @@ mod trash_tests {
     }
 
     #[test]
-    fn удаление_кладёт_файл_в_корзину() {
+    fn removal_puts_the_file_in_the_trash() {
         let (file, root, src) = fixture("trash-basic");
 
         let mut pif = Pif::from_file(&file).unwrap();
@@ -3134,26 +3134,26 @@ mod trash_tests {
         pif.remove(&uuid);
         pif.save(&file).unwrap();
 
-        assert!(!att.exists(), "файл исчез из вложений");
+        assert!(!att.exists(), "the file vanished from the attachments");
         let stats = pif.trash_stats();
-        assert_eq!(stats.files, 1, "файл должен лежать в корзине");
-        assert!(stats.bytes > 0, "размер должен считаться");
+        assert_eq!(stats.files, 1, "the file should be in the trash");
+        assert!(stats.bytes > 0, "the size should be counted");
 
         let trashed = pif
             .trash_dir()
             .unwrap()
             .join(&uuid)
             .join("trash-basic-photo.jpg");
-        assert!(trashed.exists(), "структура корзины повторяет attachments");
+        assert!(trashed.exists(), "the trash layout mirrors attachments");
 
         let _ = std::fs::remove_file(&src);
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Старая фотография не должна улететь из корзины сразу: её время
-    /// выставляется заново при переносе.
+    /// An old photo must not fly out of the trash immediately: its
+    /// timestamp is reset when it is moved.
     #[test]
-    fn старая_фотография_ждёт_свое_срока() {
+    fn an_old_photo_waits_out_its_term() {
         let (file, root, src) = fixture("trash-old");
         backdate(&src, 5 * 365);
 
@@ -3166,16 +3166,16 @@ mod trash_tests {
         pif.save(&file).unwrap();
 
         let stats = pif.trash_stats();
-        assert_eq!(stats.files, 1, "свежее удаление не должно исчезнуть сразу");
-        assert_eq!(pif.purge_trash(), 0, "очистка не должна ничего убрать");
+        assert_eq!(stats.files, 1, "a fresh deletion should not vanish at once");
+        assert_eq!(pif.purge_trash(), 0, "the cleanup should remove nothing");
 
         let _ = std::fs::remove_file(&src);
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Файл, пролежавший дольше 30 дней, убирается.
+    /// A file that sat longer than 30 days is removed.
     #[test]
-    fn просроченное_удаляется_по_сроку() {
+    fn an_expired_file_is_removed_by_the_term() {
         let (file, root, src) = fixture("trash-expiry");
 
         let mut pif = Pif::from_file(&file).unwrap();
@@ -3186,23 +3186,23 @@ mod trash_tests {
         pif.save(&file).unwrap();
         assert_eq!(pif.trash_stats().files, 1);
 
-        // Ждём своего часа.
+        // Wait out the term.
         let dir = pif.trash_dir().unwrap();
         backdate(
             &dir.join(&uuid).join("trash-expiry-photo.jpg"),
             TRASH_MAX_AGE_DAYS + 1,
         );
 
-        assert_eq!(pif.purge_trash(), 1, "просроченный файл должен исчезнуть");
+        assert_eq!(pif.purge_trash(), 1, "the expired file should vanish");
         assert_eq!(pif.trash_stats().files, 0);
 
         let _ = std::fs::remove_file(&src);
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Ручная очистка убирает всё и сразу.
+    /// A manual purge removes everything at once.
     #[test]
-    fn ручная_очистка_убирает_всё() {
+    fn a_manual_purge_removes_everything() {
         let (file, root, src) = fixture("trash-empty");
 
         let mut pif = Pif::from_file(&file).unwrap();
@@ -3221,10 +3221,10 @@ mod trash_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// До сохранения корзина не меняется: нажатие «Удалить» без «Сохранить»
-    /// не должно никуда ничего двигать.
+    /// Before a save the trash does not change: "Delete" without "Save"
+    /// must not move anything anywhere.
     #[test]
-    fn до_сохранения_корзина_пуста() {
+    fn before_a_save_the_trash_is_empty() {
         let (file, root, src) = fixture("trash-lazy");
 
         let mut pif = Pif::from_file(&file).unwrap();
@@ -3233,22 +3233,22 @@ mod trash_tests {
         pif.save(&file).unwrap();
 
         pif.remove(&uuid);
-        assert_eq!(pif.trash_stats().files, 0, "перенос только при сохранении");
+        assert_eq!(pif.trash_stats().files, 0, "the move only happens on save");
         assert!(
             pif.attachments_changed(),
-            "изменение должно быть отложенным"
+            "the change should be deferred"
         );
 
         let _ = std::fs::remove_file(&src);
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Без корзины ничего не ломается: статистика пустая, очистка — ноль.
+    /// Without a trash nothing breaks: empty stats, purge returns zero.
     #[test]
-    fn без_корзины_всё_тихо() {
+    fn without_a_trash_all_is_quiet() {
         let stats = TrashStats::default();
         assert_eq!(stats.files, 0);
         assert_eq!(stats.bytes, 0);
-        let _ = collect_trash(Path::new("/нет/такого/пути"));
+        let _ = collect_trash(Path::new("/no/such/path"));
     }
 }

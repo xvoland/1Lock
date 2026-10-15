@@ -1,14 +1,15 @@
-//! CLI чтения бэкапа 1Password.
+//! CLI for reading a 1Password backup.
 //!
-//! Подкоманды:
-//! - `info <db>` — сводка и статус KDF
-//! - `folders <db>` — список папок (uuid + геометрия блоба)
-//! - `items <db>` — список элементов (uuid, категория, папка, время)
-//! - `inspect-key <db> <uuid>` — разбор `key_data` одного элемента
-//! - `verify <db> <key-hex>` — массовая проверка HMAC заданным ключом
+//! Subcommands:
+//! - `info <db>` — summary and KDF status
+//! - `folders <db>` — list of folders (uuid + blob geometry)
+//! - `items <db>` — list of items (uuid, category, folder, time)
+//! - `inspect-key <db> <uuid>` — parse one item's `key_data`
+//! - `verify <db> <key-hex>` — bulk HMAC check with the given key
 //!
-//! Ключ нигде не читается из аргументов командной строки в открытом виде,
-//! если он дан в hex — это осознанно: аргументы видны в `ps` и в истории.
+//! A key is never read from command-line arguments in the clear,
+//! even when given as hex — deliberately: arguments are visible in `ps`
+//! and in shell history.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -16,32 +17,32 @@ use std::process::ExitCode;
 use opclient_core::{kdf, keys::Unavailable, Error, KeyProvider, Vault, KEY_LEN};
 
 const USAGE: &str = "\
-opclient — чтение бэкапа 1Password (.1p4), только чтение
+opclient — reading a 1Password backup (.1p4), read-only
 
-ИСПОЛЬЗОВАНИЕ
-  opclient <команда> <путь-к-OnePassword.sqlite> [аргументы]
+USAGE
+  opclient <command> <path-to-OnePassword.sqlite> [arguments]
 
-КОМАНДЫ
-  info <db>                 сводка: профиль, счётчики, SHA-256 базы, статус KDF
-  folders <db>              список папок
-  items <db>                список элементов
-  inspect-key <db> <uuid>   разбор key_data элемента
-  verify <db> <key-hex>     проверить HMAC всех элементов заданным ключом
+COMMANDS
+  info <db>                 summary: profile, counters, DB SHA-256, KDF status
+  folders <db>              list of folders
+  items <db>                list of items
+  inspect-key <db> <uuid>   parse an item's key_data
+  verify <db> <key-hex>     check the HMAC of every item against the given key
 
-ПРИМЕРЫ
+EXAMPLES
   opclient info OnePassword.sqlite
   opclient items OnePassword.sqlite | head
   opclient verify OnePassword.sqlite 0011223344...
 
-Расшифровка не реализована: соль для PBKDF2 находится внутри
-зашифрованного блока encryptedSymmetricKey. См. `kdf_status`.
+Decryption is not implemented: the PBKDF2 salt lives inside the
+encrypted encryptedSymmetricKey block. See `kdf_status`.
 ";
 
-/// Безопасная альтернатива `outln`.
+/// A safe alternative to `outln`.
 ///
-/// `opclient items | head` закрывает пайп на середине вывода, и обычный
-/// `outln` на этом паникует. Здесь ошибка записи просто игнорируется —
-/// так поступают git и ripgrep. Без `unsafe`, без зависимости от libc.
+/// `opclient items | head` closes the pipe halfway through the output, and a
+/// plain `outln` panics on that. Here a write error is simply ignored —
+/// the way git and ripgrep do it. No `unsafe`, no libc dependency.
 macro_rules! outln {
     () => {{
         use std::io::Write;
@@ -73,14 +74,14 @@ fn main() -> ExitCode {
         "items" => cmd_items(db),
         "inspect-key" => match args.get(3) {
             Some(u) => cmd_inspect_key(db, u),
-            None => Err(Error::NotFound("нужен uuid элемента".into())),
+            None => Err(Error::NotFound("item uuid required".into())),
         },
         "verify" => match args.get(3) {
             Some(k) => cmd_verify(db, k),
-            None => Err(Error::NotFound("нужен ключ в hex".into())),
+            None => Err(Error::NotFound("a hex key required".into())),
         },
         other => {
-            eprintln!("неизвестная команда: {other}\n");
+            eprintln!("unknown command: {other}\n");
             print!("{USAGE}");
             return ExitCode::from(2);
         }
@@ -89,7 +90,7 @@ fn main() -> ExitCode {
     match r {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("ошибка: {e}");
+            eprintln!("error: {e}");
             ExitCode::FAILURE
         }
     }
@@ -103,25 +104,25 @@ fn cmd_info(db: &Path) -> opclient_core::Result<()> {
     outln!("\n--- master_key_data ---");
     match v.inspect_master_key_data() {
         Ok(r) => {
-            outln!("размер поля   : {} B", r.total_len);
-            outln!("тег заголовка : {}", hex8(&r.header_tag));
+            outln!("size          : {} B", r.total_len);
+            outln!("header tag    : {}", hex8(&r.header_tag));
             match r.envelope {
                 Some(e) => {
                     outln!("IV            : {}", hex(&e.iv));
-                    outln!("шифротекст    : {} B", e.ciphertext_len);
-                    outln!("HMAC (записан): {}", hex(&e.mac));
+                    outln!("ciphertext    : {} B", e.ciphertext_len);
+                    outln!("HMAC (stored) : {}", hex(&e.mac));
                 }
-                None => outln!("вложенный блоб: слишком мал для IV‖CT‖HMAC"),
+                None => outln!("nested blob: too small for IV‖CT‖HMAC"),
             }
         }
-        Err(e) => outln!("не разобран: {e}"),
+        Err(e) => outln!("not parsed: {e}"),
     }
 
-    outln!("\n--- статус расшифровки ---");
+    outln!("\n--- decryption status ---");
     outln!("{}", kdf::STATUS.reason());
     match Unavailable.master_key() {
-        Ok(_) => outln!("ключ доступен"),
-        Err(e) => outln!("ключ: {e}"),
+        Ok(_) => outln!("key available"),
+        Err(e) => outln!("key: {e}"),
     }
     Ok(())
 }
@@ -129,10 +130,10 @@ fn cmd_info(db: &Path) -> opclient_core::Result<()> {
 fn cmd_folders(db: &Path) -> opclient_core::Result<()> {
     let v = Vault::open(db)?;
     let fs = v.folders()?;
-    outln!("{} папок", fs.len());
+    outln!("{} folders", fs.len());
     for f in fs {
         let tag = opdata_tag(&f.overview_data);
-        outln!("  {}  {} B  тег={}", f.uuid, f.overview_data.len(), tag);
+        outln!("  {}  {} B  tag={}", f.uuid, f.overview_data.len(), tag);
     }
     Ok(())
 }
@@ -140,7 +141,7 @@ fn cmd_folders(db: &Path) -> opclient_core::Result<()> {
 fn cmd_items(db: &Path) -> opclient_core::Result<()> {
     let v = Vault::open(db)?;
     let items = v.items()?;
-    outln!("{} элементов", items.len());
+    outln!("{} items", items.len());
     for i in &items {
         outln!(
             "  {}  cat={}  folder={}  key_data={} B  trashed={}  upd={}",
@@ -158,12 +159,12 @@ fn cmd_items(db: &Path) -> opclient_core::Result<()> {
 fn cmd_inspect_key(db: &Path, uuid: &str) -> opclient_core::Result<()> {
     let v = Vault::open(db)?;
     let r = v.inspect_item_key(uuid)?;
-    outln!("элемент  : {}", r.uuid);
-    outln!("размер   : {} B", r.report.total_len);
-    outln!("IV       : {}", hex(&r.report.iv));
-    outln!("шифротекст: {} B", r.report.ciphertext_len);
-    outln!("HMAC     : {}", hex(&r.report.mac));
-    outln!("проверка : {:?}", r.report.hmac);
+    outln!("item      : {}", r.uuid);
+    outln!("size      : {} B", r.report.total_len);
+    outln!("IV        : {}", hex(&r.report.iv));
+    outln!("ciphertext: {} B", r.report.ciphertext_len);
+    outln!("HMAC      : {}", hex(&r.report.mac));
+    outln!("check     : {:?}", r.report.hmac);
     Ok(())
 }
 
@@ -172,18 +173,18 @@ fn cmd_verify(db: &Path, key_hex: &str) -> opclient_core::Result<()> {
     let v = Vault::open(db)?;
     let scan = v.count_valid_mac(&key)?;
     outln!(
-        "элементов: {}\nразобрано: {}\nHMAC верных: {}\nHMAC неверных: {}",
+        "items: {}\nparsed: {}\nHMAC valid: {}\nHMAC invalid: {}",
         scan.total,
         scan.parsed,
         scan.valid,
         scan.total.saturating_sub(scanned_valid(&scan))
     );
     if scan.valid == scan.parsed && scan.valid > 0 {
-        outln!("\nКЛЮЧ ВЕРЕН — можно переходить к расшифровке.");
+        outln!("\nKEY IS CORRECT — decryption can proceed.");
     } else if scan.valid == 0 {
-        outln!("\nНи один HMAC не сошёлся: ключ неверен.");
+        outln!("\nNot a single HMAC matched: the key is wrong.");
     } else {
-        outln!("\nЧастичное совпадение — ключ или охват неверны.");
+        outln!("\nPartial match — the key or the coverage is wrong.");
     }
     Ok(())
 }
@@ -196,7 +197,7 @@ fn parse_key(s: &str) -> opclient_core::Result<[u8; KEY_LEN]> {
     let s = s.trim().trim_start_matches("0x");
     if s.len() != KEY_LEN * 2 {
         return Err(Error::Crypto(format!(
-            "ключ должен быть {}-байтным hex ({})",
+            "key must be a {}-byte hex value ({})",
             KEY_LEN,
             KEY_LEN * 2
         )));
@@ -204,7 +205,7 @@ fn parse_key(s: &str) -> opclient_core::Result<[u8; KEY_LEN]> {
     let mut k = [0u8; KEY_LEN];
     for (i, byte) in k.iter_mut().enumerate() {
         *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)
-            .map_err(|_| Error::Crypto("ключ не является hex".into()))?;
+            .map_err(|_| Error::Crypto("key is not hex".into()))?;
     }
     Ok(k)
 }

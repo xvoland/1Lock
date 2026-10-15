@@ -1,23 +1,23 @@
-//! Меню приложения.
+//! Application menu.
 //!
-//! iced 0.14 меню не умеет вовсе — билдер `Application` такого метода не
-//! имеет. Меню собирается через `muda`: на macOS приложение получает обычную
-//! строку меню, где «О приложении» открывает системную панель, на Windows —
-//! строку в стиле системы с «О приложении» в Help.
+//! iced 0.14 has no menu support at all — the `Application` builder has no
+//! such method. The menu is built with `muda`: on macOS the app gets a normal
+//! menu bar where "About" opens the system panel, on Windows a system-style
+//! menu bar with "About" under Help.
 //!
-//! Панель наполняется из [`crate::APP_*`], а не из Info.plist: так текст
-//! виден в одном месте вместе с окном «О приложении» и попадает в
-//! тесты. В Info.plist те же сведения остаются для Launch Services.
+//! The panel is filled from [`crate::APP_*`], not from Info.plist: that way the
+//! text lives in one place together with the "About" window and ends up in
+//! tests. Info.plist keeps the same values for Launch Services.
 
 use muda::accelerator::Accelerator;
 use muda::{AboutMetadataBuilder, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 
 use iced::Subscription;
 
-/// Идентификаторы пунктов, которые обрабатывает приложение.
+/// Identifiers of the items the application handles.
 ///
-/// Совпадают с последним сегментом имени `Message`: один список источников
-/// правды вместо того, чтобы в двух местах писать одно и то же строкой.
+/// They match the last segment of a `Message` name: one source of truth
+/// instead of writing the same string twice.
 pub mod id {
     pub const NEW_VAULT: &str = "file.new_vault";
     pub const NEW_ITEM: &str = "file.new_item";
@@ -27,32 +27,32 @@ pub mod id {
     pub const AUDIT: &str = "view.audit";
 }
 
-/// Собирает меню и вешает его на приложение.
+/// Builds the menu and attaches it to the application.
 ///
-/// Звать надо **после** старта цикла событий, то есть из первого `update`:
-/// winit при инициализации ставит на `NSApplication` своё стандартное меню
-/// и перетирает то, что было поставлено раньше. Отключить его нельзя —
-/// поле `default_menu` в winit внутреннее. Поэтому наше меню просто
-/// ставится позже и остаётся.
+/// It has to be called **after** the event loop starts, that is from the first
+/// `update`: on init winit puts its own standard menu on `NSApplication` and
+/// overwrites whatever was installed earlier. It cannot be turned off —
+/// `default_menu` is a private field in winit. So our menu is simply installed
+/// later and stays.
 ///
-/// Меню нужно удерживать: если объект освободится, macOS покажет пустую
-/// строку. `Menu` внутри устроен на `Rc` и не является `Sync`, поэтому в
-/// `static` его не положить — заводим ссылку на всё время работы
-/// программы.
+/// The menu has to be kept alive: if the object is dropped, macOS shows an empty
+/// menu bar. `Menu` is built on `Rc` internally and is not `Sync`, so it cannot
+/// go into a `static` — we keep a reference for the whole lifetime of the
+/// program.
 ///
-/// Удерживать нужно и подменю: `Submenu` — самостоятельный владелец
-/// NSMenu, и когда он освобождается, его пункты просто исчезают из строки
-/// меню. Раньше утекал только `Menu`, и в строке оставался один пункт
-/// приложения.
-/// Готовит канал событий. Вызывается из `main`, до запуска iced.
+/// Submenus have to be kept alive too: a `Submenu` is the sole owner of its
+/// NSMenu, and when it is dropped its items simply vanish from the menu bar.
+/// Earlier only `Menu` was leaked, and a single app item was left in the bar.
+/// Prepares the event channel. Called from `main`, before iced starts.
 ///
-/// Отдельно от [`install`], потому что подписка iced создаётся раньше первого
-/// `update`: если завести канал там же, где ставится меню, подписка успела бы
-/// его не увидеть и молчала бы навсегда.
+/// Separate from [`install`] because the iced subscription is created before
+/// the first `update`: if the channel were created where the menu is
+/// installed, the subscription would already have missed it and would stay
+/// silent forever.
 pub fn init() {
     let (tx, rx) = async_channel::unbounded();
-    // Получатель обязан жить вместе с отправителем, иначе канал сразу
-    // закроется и подписка молча перестанет приходить.
+    // The receiver has to live as long as the sender, otherwise the channel
+    // closes right away and the subscription silently stops arriving.
     if EVENTS
         .set(Channel {
             sender: tx,
@@ -68,23 +68,24 @@ pub fn init() {
             return;
         };
         if let Some(channel) = EVENTS.get() {
-            // Канал не ограничен, но отправка без ожидания всё же может
-            // отказать при закрытии: тогда пункт просто не сработает.
+            // The channel is unbounded, but a non-blocking send can still fail
+            // when it is closed: the item then simply does nothing.
             let _ = channel.sender.try_send(message);
         }
     }));
 }
 
-/// Собирает меню и вешает его на приложение.
+/// Builds the menu and attaches it to the application.
 ///
-/// Звать надо **после** старта цикла событий, то есть из первого `update`:
-/// winit при инициализации ставит на `NSApplication` своё стандартное меню
-/// и перетирает то, что было поставлено раньше. Отключить его нельзя —
-/// поле `default_menu` в winit внутреннее. Поэтому наше меню просто
-/// ставится позже и остаётся.
+/// It has to be called **after** the event loop starts, that is from the first
+/// `update`: on init winit puts its own standard menu on `NSApplication` and
+/// overwrites whatever was installed earlier. It cannot be turned off —
+/// `default_menu` is a private field in winit. So our menu is simply installed
+/// later and stays.
 pub fn install() {
-    // Тесты гоняют `update` в рабочем потоке, а `muda` требует главный и
-    // без лишней проверки паникует. В тестах меню всё равно не существует.
+    // Tests drive `update` on a worker thread, while `muda` demands the main
+    // one and panics without an extra check. The menu does not exist in tests
+    // anyway.
     if cfg!(test) {
         return;
     }
@@ -93,7 +94,7 @@ pub fn install() {
     if INSTALLED.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
-    // Утечка намеренная: ссылка живёт до конца программы.
+    // The leak is deliberate: the reference lives until the program ends.
     let _menu: &'static Menu = Box::leak(Box::new(build_and_install()));
 }
 
@@ -120,21 +121,21 @@ fn build_and_install() -> Menu {
 
     let menu = Menu::with_items(&[app, file_menu(), edit_menu(), view_menu(), window_menu()])
         .expect("menu bar");
-    // Только macOS: метод есть исключительно под этой платформой.
+    // macOS only: the method exists exclusively under this platform.
     menu.init_for_nsapp();
     menu
 }
 
-/// Windows: у системы нет меню приложения, «О приложении» живёт в Help,
-/// а выход — в File. Сама сборка меню общая с macOS, различаются только
-/// порядок и платформенная установка.
+/// Windows: the system has no app menu, "About" lives under Help and Quit
+/// under File. The menu build itself is shared with macOS, only the order and
+/// the platform-specific installation differ.
 #[cfg(not(target_os = "macos"))]
 fn build_and_install() -> Menu {
     Menu::with_items(&[file_menu(), edit_menu(), view_menu(), window_menu(), help_menu()])
         .expect("menu bar")
 }
 
-/// Меню «Help» с той же панелью «О приложении», что и на macOS.
+/// "Help" menu with the same "About" panel as on macOS.
 #[cfg(not(target_os = "macos"))]
 fn help_menu() -> &'static Submenu {
     Box::leak(Box::new(
@@ -154,8 +155,8 @@ fn help_menu() -> &'static Submenu {
     ))
 }
 
-/// Меню «Edit» нужно системе: без него ⌘C/⌘V/⌘A на macOS и Ctrl+C/Ctrl+V/
-/// Ctrl+A на Windows работают не везде.
+/// The system needs the "Edit" menu: without it ⌘C/⌘V/⌘A on macOS and
+/// Ctrl+C/Ctrl+V/Ctrl+A on Windows do not work everywhere.
 fn edit_menu() -> &'static Submenu {
     Box::leak(Box::new(
         Submenu::with_items(
@@ -174,9 +175,9 @@ fn edit_menu() -> &'static Submenu {
     ))
 }
 
-/// Файл: без этого меню не работают ⌘N/⌘O/⌘S на macOS и Ctrl+N/Ctrl+O/
-/// Ctrl+S на Windows, а открытие, сохранение и создание живут только
-/// кнопками в окне.
+/// File: without it ⌘N/⌘O/⌘S on macOS and Ctrl+N/Ctrl+O/Ctrl+S on Windows do
+/// not work, and opening, saving and creating live only in the window's
+/// buttons.
 fn file_menu() -> &'static Submenu {
     Box::leak(Box::new(
         Submenu::with_items(
@@ -246,13 +247,13 @@ fn window_menu() -> &'static Submenu {
     ))
 }
 
-/// Канал, через который события меню попадают в iced.
+/// The channel menu events reach iced through.
 ///
-/// Напрямую подписаться не выйдет: на macOS `muda` раздаёт события через
-/// `crossbeam_channel`, у которого блокирующий `recv()` и нет `Hash` — а
-/// `Subscription::run_with` требует именно `Hash`. Поэтому события
-/// перехватываются штатным `set_event_handler` и кладутся в
-/// `async_channel`, который уже можно ждать асинхронно.
+/// Subscribing directly is impossible: on macOS `muda` dispatches events via
+/// `crossbeam_channel`, whose `recv()` blocks and which has no `Hash` — while
+/// `Subscription::run_with` requires `Hash`. So events are intercepted via the
+/// stock `set_event_handler` and put into `async_channel`, which can already be
+/// awaited asynchronously.
 struct Channel {
     sender: async_channel::Sender<crate::Message>,
     receiver: async_channel::Receiver<crate::Message>,
@@ -260,11 +261,12 @@ struct Channel {
 
 static EVENTS: std::sync::OnceLock<Channel> = std::sync::OnceLock::new();
 
-/// Обёртка получателя: `Subscription::run_with` требует `Hash`, а сам канал
-/// его не реализует.
+/// Receiver wrapper: `Subscription::run_with` requires `Hash` and the channel
+/// itself does not implement it.
 ///
-/// Канал в программе один и больше не меняется, поэтому хеш у него
-/// постоянный: пересоздавать подписку с другим хешем незачем.
+/// There is one channel in the program and it never changes, so its hash is
+/// constant: there is no reason to rebuild the subscription with a different
+/// one.
 #[derive(Clone)]
 struct Rx(Option<async_channel::Receiver<crate::Message>>);
 
@@ -274,29 +276,29 @@ impl std::hash::Hash for Rx {
     }
 }
 
-/// Подписка iced на события меню.
+/// The iced subscription to menu events.
 pub fn events() -> Subscription<crate::Message> {
     let rx = Rx(EVENTS.get().map(|c| c.receiver.clone()));
     Subscription::run_with(rx, build_events)
 }
 
-/// Поток подписки. Собирается один раз и живёт вместе с программой.
+/// The subscription's stream. Built once and lives as long as the program.
 fn build_events(
     rx: &Rx,
 ) -> std::pin::Pin<Box<dyn iced::futures::stream::Stream<Item = crate::Message> + Send>> {
     match &rx.0 {
         Some(rx) => Box::pin(iced::futures::stream::unfold(rx.clone(), |rx| async move {
-            // Канал закрыт только если программа выходит; на этом поток и
-            // должен закончиться.
+            // The channel is closed only when the program exits, which is
+            // exactly when the stream is supposed to end.
             rx.recv().await.ok().map(|msg| (msg, rx))
         })),
-        // Меню не установлено: ждём вечно, чтобы подписка молчала, а не
-        // исчезла и дёргала интерфейс пересозданием.
+        // No menu installed: wait forever so the subscription stays silent
+        // instead of disappearing and thrashing the UI through recreation.
         None => Box::pin(iced::futures::stream::pending()),
     }
 }
 
-/// Событие меню в сообщение приложения.
+/// A menu event as an application message.
 fn message_for(id: &MenuId) -> Option<crate::Message> {
     use crate::Message;
 
@@ -311,7 +313,7 @@ fn message_for(id: &MenuId) -> Option<crate::Message> {
     }
 }
 
-/// Данные для системной панели «О приложении».
+/// Data for the system "About" panel.
 fn about_metadata() -> muda::AboutMetadata {
     AboutMetadataBuilder::new()
         .name(Some(crate::APP_TITLE))
@@ -329,9 +331,9 @@ fn about_metadata() -> muda::AboutMetadata {
 mod tests {
     use super::*;
 
-    /// Данные панели «О приложении» должны содержать автора и адрес.
+    /// The "About" panel data must carry the author and the address.
     #[test]
-    fn в_панели_есть_автор_и_сайт() {
+    fn about_panel_has_author_and_website() {
         let m = about_metadata();
         assert_eq!(m.name.as_deref(), Some(crate::APP_TITLE));
         assert_eq!(
@@ -347,9 +349,9 @@ mod tests {
             .is_some_and(|c| c.contains("Vitalii") && c.contains("xVoLAnD")));
     }
 
-    /// Панель собирается дважды без паники: данные не изменяются.
+    /// The panel is built twice without a panic: the data is not mutable.
     #[test]
-    fn метаданные_собираются_повторно() {
+    fn metadata_can_be_built_repeatedly() {
         let a = about_metadata();
         let b = about_metadata();
         assert_eq!(a.website, b.website);

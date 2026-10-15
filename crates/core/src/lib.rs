@@ -1,28 +1,28 @@
-//! `opclient-core` — чтение формата 1Password Agile Keychain (`.1p4`).
+//! `opclient-core` — reading the 1Password Agile Keychain (`.1p4`) format.
 //!
-//! # Что работает сейчас
+//! # What works today
 //!
-//! - открытие базы строго на чтение;
-//! - обзор профиля, папок, категорий, элементов;
-//! - разбор контейнера `opdata01` и геометрии блоба `IV ‖ CT ‖ HMAC`;
-//! - проверка HMAC заданным ключом (однозначный критерий);
-//! - полная SHA-256 базы для контроля неизменности исходника.
+//! - opening the database strictly read-only;
+//! - browsing the profile, folders, categories, items;
+//! - parsing the `opdata01` container and the `IV ‖ CT ‖ HMAC` blob geometry;
+//! - checking the HMAC with a given key (an unambiguous criterion);
+//! - a full SHA-256 of the database to keep an eye on the source staying unchanged.
 //!
-//! # Что не работает
+//! # What does not work
 //!
-//! Расшифровка. KDF не восстановлен: соль для PBKDF2 лежит внутри
-//! зашифрованного блока `encryptedSymmetricKey`. Подробности и журнал
-//! неудачных гипотез — в `docs/FORMAT.md`.
+//! Decryption. The KDF has not been recovered: the salt for PBKDF2 lives inside
+//! the encrypted `encryptedSymmetricKey` block. Details and a log of failed
+//! hypotheses — in `docs/FORMAT.md`.
 //!
-//! # Пример
+//! # Example
 //!
 //! ```no_run
 //! use opclient_core::{Vault, KeyProvider, keys::Unavailable};
 //!
 //! let v = Vault::open("/path/to/OnePassword.sqlite")?;
 //! let s = v.summary()?;
-//! println!("элементов: {}", s.item_count);
-//! assert!(Unavailable.master_key().is_err()); // соль неизвестна
+//! println!("items: {}", s.item_count);
+//! assert!(Unavailable.master_key().is_err()); // salt is unknown
 //! # Ok::<(), opclient_core::Error>(())
 //! ```
 
@@ -43,13 +43,13 @@ pub use error::{Error, Result};
 pub use keys::KeyProvider;
 pub use vault::{Item, Vault};
 
-/// Длина ключа AES-256, используемого для блоков профиля и элементов.
+/// Length of the AES-256 key used for profile and item blocks.
 pub const KEY_LEN: usize = envelope::KEY_LEN;
 
-/// Версия крейта.
+/// Crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Статус восстановления KDF на момент сборки.
+/// KDF recovery status as of this build.
 pub fn kdf_status() -> kdf::KdfStatus {
     kdf::STATUS
 }
@@ -57,39 +57,39 @@ pub fn kdf_status() -> kdf::KdfStatus {
 mod integration {
     use super::*;
 
-    /// Тест на реальном экспорте, если файл доступен.
-    /// Путь задаётся переменной окружения `OPCLIENT_GOLDEN_1PIF`.
-    /// Без неё тест пропускается, чтобы сборка не зависела от личных данных.
+    /// Test against a real export, if the file is available.
+    /// The path is given by the `OPCLIENT_GOLDEN_1PIF` environment variable.
+    /// Without it the test is skipped, so the build does not depend on personal data.
     #[test]
     fn parses_real_export_when_present() {
         let Ok(path) = std::env::var("OPCLIENT_GOLDEN_1PIF") else {
-            eprintln!("OPCLIENT_GOLDEN_1PIF не задан — тест пропущен");
+            eprintln!("OPCLIENT_GOLDEN_1PIF is not set — test skipped");
             return;
         };
-        let pif = pif::Pif::from_file(&path).expect("экспорт должен читаться");
+        let pif = pif::Pif::from_file(&path).expect("export must be readable");
         let entries = pif.entries();
-        assert!(!entries.is_empty(), "в экспорте нет записей");
-        eprintln!("прочитано записей: {}", entries.len());
+        assert!(!entries.is_empty(), "the export has no entries");
+        eprintln!("read {} entries", entries.len());
 
-        // У каждой записи должен быть заголовок, иначе список UI будет пустым.
+        // Every entry must have a title, otherwise the UI list comes out empty.
         let titled = entries.iter().filter(|i| i.title.is_some()).count();
-        assert!(titled > 0, "нет ни одной записи с заголовком");
+        assert!(titled > 0, "not a single entry has a title");
 
-        // Поиск обязан что-то находить.
+        // Search has to find something.
         let first = entries[0].title.clone().unwrap_or_default();
         let q: String = first.chars().take(4).collect();
         if q.len() >= 2 {
-            assert!(!pif.search(&q).is_empty(), "поиск по {q:?} ничего не нашёл");
+            assert!(!pif.search(&q).is_empty(), "search for {q:?} found nothing");
         }
     }
 
-    /// Согласованность: TOTP-код из экспорта считается и не падает.
+    /// Consistency: a TOTP code from the export can be computed without failing.
     #[test]
     fn totp_from_export_is_computable() {
         let Ok(path) = std::env::var("OPCLIENT_GOLDEN_1PIF") else {
             return;
         };
-        let pif = pif::Pif::from_file(&path).expect("экспорт должен читаться");
+        let pif = pif::Pif::from_file(&path).expect("export must be readable");
         let mut checked = 0;
         for item in pif.entries() {
             if let Some(uri) = item.totp() {
@@ -103,6 +103,6 @@ mod integration {
                 }
             }
         }
-        eprintln!("TOTP проверен для {checked} записей");
+        eprintln!("TOTP verified for {checked} entries");
     }
 }

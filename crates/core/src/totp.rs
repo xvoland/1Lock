@@ -1,32 +1,32 @@
-//! TOTP/HOTP по RFC 4226 и RFC 6238.
+//! TOTP/HOTP per RFC 4226 and RFC 6238.
 //!
-//! Разбирает URI вида `otpauth://totp/Issuer:account?secret=…&period=30&digits=6&algorithm=SHA1`.
+//! Parses URIs of the form `otpauth://totp/Issuer:account?secret=…&period=30&digits=6&algorithm=SHA1`.
 //!
-//! Секрет — это база32 (RFC 4648, без padding, обычно запись 1Password).
+//! The secret is base32 (RFC 4648, no padding, typically 1Password's notation).
 //!
-//! ## Замечание о совместимости
+//! ## Compatibility note
 //!
-//! 1Password использует стандартный HOTP/TOTP. Поддерживаются SHA-1 (по
-//! умолчанию), SHA-256 и SHA-512 — выбор через параметр `algorithm`.
-//! Значение по умолчанию `SHA1`, как требует RFC 6238 и как делает
-//! большинство приложений, включая 1Password.
+//! 1Password uses standard HOTP/TOTP. SHA-1 (the default), SHA-256 and
+//! SHA-512 are supported — chosen via the `algorithm` parameter.
+//! The default is `SHA1`, as RFC 6238 requires and as most applications,
+//! 1Password included, do.
 
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
 use sha2::{Sha256, Sha512};
 
-/// Ошибка разбора или вычисления.
+/// A parse or computation error.
 #[derive(Debug, PartialEq, Eq)]
 pub enum TotpError {
-    /// Неизвестная схема (ожидается `otpauth`).
+    /// Unknown scheme (`otpauth` expected).
     BadScheme,
-    /// Отсутствует обязательный параметр `secret`.
+    /// The mandatory `secret` parameter is missing.
     MissingSecret,
-    /// Секрет не является корректным base32.
+    /// The secret is not valid base32.
     BadSecret,
-    /// Неподдерживаемый алгоритм.
+    /// Unsupported algorithm.
     BadAlgorithm,
-    /// Некорректный URI в целом.
+    /// The URI is malformed overall.
     BadUri,
 }
 
@@ -45,10 +45,10 @@ impl std::fmt::Display for TotpError {
 
 impl std::error::Error for TotpError {}
 
-/// Хеш-функция OTP.
+/// OTP hash function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Algorithm {
-    /// SHA-1, по умолчанию.
+    /// SHA-1, the default.
     Sha1,
     /// SHA-256.
     Sha256,
@@ -67,7 +67,7 @@ impl Algorithm {
     }
 }
 
-/// Разобранный дескриптор TOTP.
+/// A parsed TOTP descriptor.
 #[derive(Debug, Clone)]
 pub struct Totp {
     secret: Vec<u8>,
@@ -77,7 +77,7 @@ pub struct Totp {
 }
 
 impl Totp {
-    /// Разбирает `otpauth://` URI.
+    /// Parses an `otpauth://` URI.
     pub fn parse(uri: &str) -> Result<Self, TotpError> {
         let rest = uri.strip_prefix("otpauth://").ok_or(TotpError::BadScheme)?;
         let rest = rest
@@ -125,17 +125,17 @@ impl Totp {
         })
     }
 
-    /// Число цифр в коде.
+    /// Number of digits in the code.
     pub fn digits(&self) -> u32 {
         self.digits
     }
 
-    /// Период в секундах.
+    /// Period in seconds.
     pub fn period(&self) -> u64 {
         self.period
     }
 
-    /// Код для момента `unix_seconds`.
+    /// The code at the instant `unix_seconds`.
     pub fn code_at(&self, unix_seconds: u64) -> String {
         let counter = unix_seconds / self.period;
         let mac = match self.algorithm {
@@ -162,18 +162,18 @@ impl Totp {
         format!("{:0width$}", binary % modulus, width = self.digits as usize)
     }
 
-    /// Код для текущего момента.
+    /// The code for the current instant.
     pub fn code_now(&self) -> String {
         self.code_at(now_unix())
     }
 
-    /// Остаток секунд до смены кода.
+    /// Seconds left until the code changes.
     pub fn seconds_remaining(&self, unix_seconds: u64) -> u64 {
         self.period - (unix_seconds % self.period)
     }
 }
 
-/// HMAC-SHA1 поверх крейта `sha1` — используется по умолчанию в OTP.
+/// HMAC-SHA1 over the `sha1` crate — the default in OTP.
 fn hmac_sha1(key: &[u8], data: &[u8]) -> Vec<u8> {
     let mut m = Hmac::<Sha1>::new_from_slice(key)
         .map_err(|_| "wrong key length")
@@ -182,10 +182,10 @@ fn hmac_sha1(key: &[u8], data: &[u8]) -> Vec<u8> {
     m.finalize().into_bytes().to_vec()
 }
 
-/// Декодер base32 (RFC 4648, алфавит A–Z и 2–7).
+/// base32 decoder (RFC 4648, A–Z and 2–7 alphabet).
 ///
-/// Пробелы и дефисы внутри секрета игнорируются, padding `=` не требуется.
-/// 5 бит на символ: 8 символов дают 5 байт.
+/// Spaces and hyphens inside the secret are ignored; `=` padding is not
+/// required. 5 bits per character: 8 characters yield 5 bytes.
 fn decode_base32(s: &str) -> Option<Vec<u8>> {
     let mut bits = 0u32;
     let mut acc = 0u32;
@@ -232,7 +232,7 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Текущее время Unix.
+/// The current Unix time.
 pub fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -244,8 +244,8 @@ pub fn now_unix() -> u64 {
 mod tests {
     use super::*;
 
-    /// Вектор RFC 6238: secret = "12345678901234567890" (ASCII),
-    /// SHA-1, 8 цифр, T=59 → 94287082.
+    /// RFC 6238 vector: secret = "12345678901234567890" (ASCII),
+    /// SHA-1, 8 digits, T=59 → 94287082.
     const SECRET: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
 
     #[test]

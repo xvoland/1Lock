@@ -1,11 +1,11 @@
 /target
-# сборка .app воспроизводится через scripts/make-bundle.sh
+# the .app build is reproduced via scripts/make-bundle.sh
 /dist
 
-# macOS мусор
+# macOS junk
 .DS_Store
 
-# ground truth содержит открытые пароли — никогда не коммитить
+# ground truth contains open passwords — never commit it
 tests/fixtures/
 *.1pif
 *.csv
@@ -13,8 +13,8 @@ golden.json
 *.db
 *.sqlite
 
-# Документация остаётся на диске, но в репозиторий не попадает.
-# Файлы вынуты из индекса через `git rm --cached`: правило действует
-# только на неотслеживаемые, само по себе оно из индекса ничего не убирает.
-# Уже закоммиченные копии остаются в истории — здесь это осознанно.
+# Documentation stays on disk but does not reach the repository.
+# The files were taken out of the index with `git rm --cached`: the rule only
+# applies to untracked ones, on its own it removes nothing from the index.
+# Already committed copies stay in the history — that is deliberate here.
 *.md

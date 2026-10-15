@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "CLI для чтения бэкапа 1Password (.1p4) без модификации исходных данных"
+description = "CLI for reading a 1Password backup (.1p4) without modifying the original data"
 
 [dependencies]
 opclient-core.workspace = true

@@ -1,28 +1,28 @@
-//! Контейнер `opdata01` и схема блоба `IV ‖ CT ‖ HMAC`.
+//! The `opdata01` container and the `IV ‖ CT ‖ HMAC` blob layout.
 //!
-//! ## Что подтверждено дизассемблером
+//! ## What the disassembler confirmed
 //!
-//! Источник: `OnePasswordCore.framework`, файл `OPAESKey.m`,
-//! метод `-[OPAESKey encryptDataOfLength:reader:writer:error:]`.
+//! Source: `OnePasswordCore.framework`, file `OPAESKey.m`,
+//! method `-[OPAESKey encryptDataOfLength:reader:writer:error:]`.
 //!
 //! ```text
-//! IV   = _randomData(16)                          // 16 случайных байт
-//! key  = OPAESKey._rawKey                          // 32 байта (AES-256)
+//! IV   = _randomData(16)                          // 16 random bytes
+//! key  = OPAESKey._rawKey                          // 32 bytes (AES-256)
 //! CBC  = CCCryptorCreate(ENCRYPT, AES, PKCS7, key, 32, IV, &cryptor)
 //! HMAC = CCHmacInit(SHA256, key); CCHmacUpdate(buf, buf.length)
 //! blob = IV(16) ‖ ciphertext ‖ HMAC(32)           // encrypt-then-MAC
 //! ```
 //!
-//! HMAC считается **по `IV ‖ ciphertext`** тем же 32-байтовым ключом.
+//! The HMAC is computed **over `IV ‖ ciphertext`** with that same 32-byte key.
 //!
-//! ## Что НЕ подтверждено
+//! ## What is NOT confirmed
 //!
-//! Применение этой схемы к `profiles.master_key_data` — экстраполяция
-//! из `OPAESKey` на слой сериализации базы. Структура заголовка
-//! `opdata01` (первые 8 байт после магии) не разобрана: значения
-//! различаются по типу записи и не являются ни версией, ни длиной.
+//! Applying this scheme to `profiles.master_key_data` is an extrapolation
+//! from `OPAESKey` up to the database serialization layer. The `opdata01`
+//! header structure (the first 8 bytes after the magic) is not understood: the values
+//! differ per record type and are neither a version nor a length.
 //!
-//! Об этом честно предупреждает [`Envelope::hmac_status`].
+//! [`Envelope::hmac_status`] says so honestly.
 
 use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
 use hmac::{Hmac, Mac};
@@ -33,35 +33,35 @@ use crate::error::{Error, Result};
 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 type HmacSha256 = Hmac<Sha256>;
 
-/// Магия сериализованного блоба 1Password.
+/// Magic prefix of a serialized 1Password blob.
 pub const MAGIC: [u8; 8] = *b"opdata01";
 
-/// Длина магии.
+/// Length of the magic.
 pub const MAGIC_LEN: usize = 8;
 
-/// Длина заголовка: магия + 8 байт типа/флага записи.
+/// Header length: magic + 8 bytes of record type/flag.
 pub const HEADER_LEN: usize = 16;
 
-/// Длина IV.
+/// IV length.
 pub const IV_LEN: usize = 16;
 
-/// Длина HMAC-SHA256.
+/// HMAC-SHA256 length.
 pub const MAC_LEN: usize = 32;
 
-/// Длина ключа AES-256.
+/// AES-256 key length.
 pub const KEY_LEN: usize = 32;
 
-/// Заголовок блоба: 8 байт магии + 8 байт, зависящих от типа записи.
+/// Blob header: 8 magic bytes + 8 bytes that depend on the record type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
-    /// Всегда `opdata01`.
+    /// Always `opdata01`.
     pub magic: [u8; 8],
-    /// Сырые 8 байт после магии. Их смысл не установлен.
+    /// The raw 8 bytes after the magic. Their meaning is not established.
     pub tag: [u8; 8],
 }
 
 impl Header {
-    /// Разбирает первые 16 байт блоба.
+    /// Parses the first 16 bytes of a blob.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < HEADER_LEN {
             return Err(Error::Truncated {
@@ -76,12 +76,12 @@ impl Header {
         Ok(Self { magic, tag })
     }
 
-    /// `true`, если магия совпадает с `opdata01`.
+    /// `true` when the magic equals `opdata01`.
     pub fn has_magic(&self) -> bool {
         self.magic == MAGIC
     }
 
-    /// Байты заголовка в исходном порядке.
+    /// Header bytes in their original order.
     pub fn to_bytes(self) -> [u8; HEADER_LEN] {
         let mut out = [0u8; HEADER_LEN];
         out[..8].copy_from_slice(&self.magic);
@@ -90,19 +90,19 @@ impl Header {
     }
 }
 
-/// Результат проверки HMAC.
+/// Result of an HMAC check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HmacStatus {
-    /// HMAC совпал: ключ верный, данные неповреждены.
+    /// HMAC matched: the key is right, the data is intact.
     Valid,
-    /// HMAC не совпал: ключ неверен либо данные повреждены.
+    /// HMAC did not match: either the key is wrong or the data is damaged.
     Invalid,
-    /// Проверка невозможна (короткий блоб или нулевой ключ).
+    /// The check is impossible (blob too short, or zero key).
     NotChecked,
 }
 
-/// Блок `IV ‖ ciphertext ‖ HMAC` — то, что лежит в поле `key_data`
-/// (всегда 112 байт) и после заголовка в полях профиля.
+/// An `IV ‖ ciphertext ‖ HMAC` block — what lives in the `key_data` field
+/// (always 112 bytes) and, after the header, in the profile fields.
 #[derive(Debug, Clone)]
 pub struct Envelope {
     iv: [u8; IV_LEN],
@@ -111,7 +111,7 @@ pub struct Envelope {
 }
 
 impl Envelope {
-    /// Разбирает блоб по схеме `IV ‖ CT ‖ HMAC`.
+    /// Parses a blob by the `IV ‖ CT ‖ HMAC` layout.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < IV_LEN + MAC_LEN {
             return Err(Error::Truncated {
@@ -131,34 +131,34 @@ impl Envelope {
         })
     }
 
-    /// IV блоба.
+    /// The blob's IV.
     pub fn iv(&self) -> &[u8; IV_LEN] {
         &self.iv
     }
 
-    /// Шифротекст без IV и HMAC.
+    /// The ciphertext without IV and HMAC.
     pub fn ciphertext(&self) -> &[u8] {
         &self.ciphertext
     }
 
-    /// HMAC как он записан в блобе.
+    /// The HMAC exactly as recorded in the blob.
     pub fn mac(&self) -> &[u8; MAC_LEN] {
         &self.mac
     }
 
-    /// Общий размер блоба в байтах.
+    /// Total size of the blob in bytes.
     pub fn len(&self) -> usize {
         IV_LEN + self.ciphertext.len() + MAC_LEN
     }
 
-    /// Всегда `false`: минимальный блоб содержит IV и HMAC.
+    /// Always `false`: the smallest blob still holds an IV and an HMAC.
     pub fn is_empty(&self) -> bool {
         false
     }
 
-    /// Проверяет HMAC-SHA256 по `IV ‖ ciphertext` тем же ключом.
+    /// Checks HMAC-SHA256 over `IV ‖ ciphertext` with the same key.
     ///
-    /// Критерий однозначный: ложное срабатывание 2⁻²⁵⁶.
+    /// The criterion is unambiguous: false positives are 2⁻²⁵⁶.
     pub fn verify(&self, key: &[u8; KEY_LEN]) -> HmacStatus {
         if key.iter().all(|b| *b == 0) {
             return HmacStatus::NotChecked;
@@ -179,10 +179,10 @@ impl Envelope {
         })
     }
 
-    /// Расшифровывает AES-256-CBC и снимает PKCS#7.
+    /// Decrypts AES-256-CBC and strips PKCS#7.
     ///
-    /// Вызывать имеет смысл только после [`Envelope::verify`] == [`HmacStatus::Valid`]:
-    /// иначе результат — случайный шум.
+    /// Only worth calling after [`Envelope::verify`] == [`HmacStatus::Valid`]:
+    /// otherwise the result is just random noise.
     pub fn decrypt(&self, key: &[u8; KEY_LEN]) -> Result<Vec<u8>> {
         match self.verify(key) {
             HmacStatus::Valid => {}
@@ -203,10 +203,10 @@ impl Envelope {
         Ok(pt.to_vec())
     }
 
-    /// Пытается расшифровать, не требуя верного HMAC.
+    /// Tries to decrypt without requiring a valid HMAC.
     ///
-    /// Только для диагностики: полезно, чтобы отличить «ключ неверен»
-    /// от «ключ верен, но формат не тот». В продакшене не использовать.
+    /// Diagnostics only: useful to tell "the key is wrong" apart from "the key
+    /// is right but the format isn't what we assumed". Do not use in production.
     pub fn decrypt_unverified(&self, key: &[u8; KEY_LEN]) -> Option<Vec<u8>> {
         if self.ciphertext.is_empty() || self.ciphertext.len() % 16 != 0 {
             return None;
@@ -217,7 +217,7 @@ impl Envelope {
             .map(|p| p.to_vec())
     }
 
-    /// Диагностика: длина, HMAC и опыт расшифровки.
+    /// Diagnostics: length, HMAC, and a decryption attempt.
     pub fn inspect(&self, key: Option<&[u8; KEY_LEN]>) -> EnvelopeReport {
         let status = match key {
             Some(k) => self.verify(k),
@@ -237,24 +237,24 @@ impl Envelope {
     }
 }
 
-/// Диагностический отчёт по блобу.
+/// Diagnostics report for a blob.
 #[derive(Debug, Clone)]
 pub struct EnvelopeReport {
-    /// Общий размер блоба.
+    /// Total size of the blob.
     pub total_len: usize,
     /// IV.
     pub iv: [u8; IV_LEN],
-    /// Длина шифротекста.
+    /// Ciphertext length.
     pub ciphertext_len: usize,
-    /// HMAC из блоба.
+    /// HMAC taken from the blob.
     pub mac: [u8; MAC_LEN],
-    /// Результат проверки HMAC.
+    /// Result of the HMAC check.
     pub hmac: HmacStatus,
-    /// Длина plaintext при снятии HMAC-проверки — только диагностика.
+    /// Plaintext length when the HMAC check is skipped — diagnostics only.
     pub unverified_plaintext_len: Option<usize>,
 }
 
-/// Разбирает полное поле базы: заголовок `opdata01` + блоб.
+/// Parses a complete database field: `opdata01` header + blob.
 pub fn parse_field(bytes: &[u8]) -> Result<(Header, Option<Envelope>)> {
     let header = Header::parse(bytes)?;
     let rest = &bytes[HEADER_LEN..];
@@ -339,7 +339,7 @@ mod tests {
 
         let key = [0x11u8; KEY_LEN];
         let iv = [0x22u8; IV_LEN];
-        // 32 байта данных; буфер с запасом под полный блок PKCS7 (16) — иначе PadError
+        // 32 bytes of data; buffer padded to a full PKCS7 block (16) — otherwise PadError
         let plain = b"0123456789abcdef0123456789abcde1".as_ref();
         let mut buf = vec![0u8; plain.len() + 16];
         buf[..plain.len()].copy_from_slice(plain);

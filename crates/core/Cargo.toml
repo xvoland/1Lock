@@ -4,11 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Чтение формата 1Password Agile Keychain (.1p4) без модификации исходных данных"
+description = "Read the 1Password Agile Keychain format (.1p4) without modifying the source data"
 
 [dependencies]
-# SQLite-чтение. bundled — чтобы не тянуть системную либлиотеку,
-# это важно для кросс-сборки под Windows.
+# SQLite reading. bundled — so we don't pull in a system library,
+# which matters for cross-compilation on Windows.
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

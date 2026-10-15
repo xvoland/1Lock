@@ -1,51 +1,51 @@
-//! Ошибки чтения формата 1Password.
+//! Errors when reading the 1Password format.
 
 use thiserror::Error;
 
-/// Результат операции.
+/// Result of an operation.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Ошибка чтения формата.
+/// A failure while reading the format.
 #[derive(Debug, Error)]
 pub enum Error {
-    /// База или файл не найден.
+    /// Database or file not found.
     #[error("no such path: {0}")]
     NotFound(String),
 
-    /// Данных меньше, чем нужно для разбора.
+    /// Less data than parsing needs.
     #[error("data truncated: got {have}, need {need}")]
     Truncated {
-        /// Сколько байт есть.
+        /// How many bytes are present.
         have: usize,
-        /// Сколько требуется.
+        /// How many are required.
         need: usize,
     },
 
-    /// Ошибка SQLite.
+    /// SQLite failure.
     #[error("SQLite: {0}")]
     Sqlite(#[from] rusqlite::Error),
 
-    /// Ошибка криптографии или формата блоба.
+    /// Cryptography failure or malformed blob.
     #[error("crypto/format: {0}")]
     Crypto(String),
 
-    /// HMAC не сошёлся — расшифровка не имеет смысла.
+    /// HMAC did not match — decryption would be meaningless.
     #[error("HMAC mismatch ({0}), decryption is impossible")]
     HmacNotVerified(String),
 
-    /// Заголовок `opdata01` не распознан.
+    /// The `opdata01` header was not recognized.
     #[error("expected opdata01 magic, got {0:?}")]
     BadMagic([u8; 8]),
 
-    /// Ключ недоступен: KDF ещё не восстановлен.
+    /// Key unavailable: the KDF has not been recovered yet.
     #[error("key unavailable: {0}")]
     KeyUnavailable(String),
 
-    /// Ошибка ввода-вывода.
+    /// I/O failure.
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
 
-    /// Ошибка разбора JSON.
+    /// JSON parse failure.
     #[error("JSON: {0}")]
     Json(#[from] serde_json::Error),
 }
