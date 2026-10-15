@@ -65,11 +65,13 @@ jobs:
           tag=$(git describe --tags --abbrev=0 | sed 's/^v//')
           echo "bundle: $bundle, tag: $tag"
           test "$bundle" = "$tag"
-      - name: Archive
-        run: tar -czf 1Lock-macos.tar.gz -C dist 1Lock.app
       # A disk image holding the app and a link to /Applications, so it installs
       # by dragging, the way people expect. No extra tooling: hdiutil and
       # diskutil ship with macOS, and create-dmg is overkill for two files.
+      #
+      # The raw .app is not published as an artifact of its own: the image
+      # already contains it, and a second download only gives people a second
+      # way to install it wrong.
       - name: Disk image
         run: |
           stage="$RUNNER_TEMP/dmg"
@@ -107,10 +109,6 @@ jobs:
         with:
           name: 1Lock-macos-dmg
           path: 1Lock-macos.dmg
-      - uses: actions/upload-artifact@v4
-        with:
-          name: 1Lock-macos-app
-          path: 1Lock-macos.tar.gz
 
   windows:
     name: .exe build
