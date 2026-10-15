@@ -11,6 +11,10 @@ description = "Read the 1Password Agile Keychain format (.1p4) without modifying
 # which matters for cross-compilation on Windows.
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
+# System randomness for new uuids. Wraps /dev/urandom on Unix and
+# BCryptGenRandom on Windows; reading /dev/urandom by hand only worked on the
+# first of the two.
+getrandom = "0.4"
 serde_json = "1"
 thiserror = "1"
 sha1 = "0.10"

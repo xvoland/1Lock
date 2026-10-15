@@ -2947,6 +2947,7 @@ dependencies = [
  "aes",
  "base64",
  "cbc",
+ "getrandom 0.4.3",
  "hmac",
  "rusqlite",
  "serde",

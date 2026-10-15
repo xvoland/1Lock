@@ -1603,15 +1603,37 @@ pub fn unix_now() -> i64 {
 }
 
 /// A new uuid in 1PIF format: 32 uppercase hex characters, no dashes.
+///
+/// Entropy comes from `getrandom`, which is already in the tree as a
+/// transitive dependency and wraps `/dev/urandom` on Unix and `BCryptGenRandom`
+/// on Windows. Reading `/dev/urandom` directly was shorter, but it only
+/// exists on Unix: on Windows the open failed, the failure was swallowed and
+/// every new item got `00000000000000000000000000000000`. Items, folders and
+/// attachments are keyed by this uuid, so that collision was not cosmetic.
+///
+/// A failure of the syscall itself must not produce zeros either. Time and a
+/// counter are weaker, but they cannot collide within one run, and a uuid is
+/// only ever compared for equality inside a single export.
 pub fn new_uuid() -> String {
+    use std::sync::atomic::Ordering;
+
     let mut bytes = [0u8; 16];
-    // /dev/urandom exists on every macOS system and pulls in no dependencies.
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        use std::io::Read;
-        let _ = f.read_exact(&mut bytes);
+    if getrandom::fill(&mut bytes).is_err() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        bytes[..8].copy_from_slice(&nanos.to_le_bytes());
+        bytes[8..].copy_from_slice(&UUID_COUNTER.fetch_add(1, Ordering::Relaxed).to_le_bytes());
+        // The low byte is set unconditionally: a clock that has not ticked
+        // since boot would otherwise leave a zero byte in every uuid.
+        bytes[15] |= 1;
     }
     bytes.iter().map(|b| format!("{b:02X}")).collect()
 }
+
+/// Makes the fallback unique within one run.
+static UUID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The trash directory next to the export.
 pub const TRASH_DIR_NAME: &str = "trash";
