@@ -13,11 +13,15 @@ use std::path::{Path, PathBuf};
 /// `None`: the remembered path was silently disabled, with no error and no
 /// message. There we use `%APPDATA%` — the standard place for settings on
 /// Windows.
+///
+/// Both branches are tail expressions rather than an early `return`: exactly
+/// one of them survives `cfg`, and a `return` in front of nothing reads as
+/// dead code to clippy — but only on the platform that keeps it.
 fn state_file() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         let dir = std::env::var_os("APPDATA")?;
-        return Some(PathBuf::from(dir).join(crate::APP_TITLE).join("last-path"));
+        Some(PathBuf::from(dir).join(crate::APP_TITLE).join("last-path"))
     }
     #[cfg(not(target_os = "windows"))]
     {
