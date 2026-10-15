@@ -67,9 +67,12 @@ fn resources(version: &str) {
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"),
     );
     // Путь абсолютный: `rc.exe` ищет файл относительно каталога пакета, а
-    // иконка лежит уровнем выше, в assets/ всего репозитория.
+    // иконка лежит в assets/ всего репозитория. От каталога пакета
+    // `crates/ui` до него два уровня, а не один: `../assets` указывал бы на
+    // `crates/assets`, которого нет, и сборка падала бы ровно на Windows —
+    // там build.rs единственный, кто ищет иконку.
     let icon = manifest_dir
-        .join("../assets/app-icon.png")
+        .join("../../assets/app-icon.png")
         .canonicalize()
         .expect("assets/app-icon.png не найден");
 

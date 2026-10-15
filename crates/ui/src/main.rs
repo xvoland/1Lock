@@ -3491,7 +3491,7 @@ mod editing_tests {
     use super::tests_common::*;
     use super::*;
 
-    /// Приложение с копией настоящего экспорта (либо с крошечной заглушкой).
+    /// Приложение с копией настоящего экспорта (либо с заглушкой).
     fn app_with_export(tag: &str) -> (App, PathBuf) {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../golden")
@@ -3503,12 +3503,29 @@ mod editing_tests {
         if src.exists() {
             std::fs::copy(&src, &file).unwrap();
         } else {
-            std::fs::write(&file, "{\"uuid\":\"U1\",\"typeName\":\"securenotes.SecureNote\",\"title\":\"A\",\"secureContents\":{}}\n").unwrap();
+            std::fs::write(&file, STUB_EXPORT).unwrap();
         }
         let mut app = App::blank();
         assert!(app.open(file.clone()));
         (app, root)
     }
+
+    /// Заглушка на случай, когда настоящего экспорта нет.
+    ///
+    /// Записей здесь ровно столько, сколько нужно тестам: они выбирают
+    /// вторую и третью, а на одной записи выбор был пустым и `unwrap()` на
+    /// `None` ронял три теста. Раньше это было незаметно — рядом лежал
+    /// настоящий экспорт на 533 записи, он и подставлялся вместо заглушки.
+    /// Но он лежит вне репозитория и в CI его нет, так что падение вылезло
+    /// только на чистой машине.
+    const STUB_EXPORT: &str = concat!(
+        r#"{"uuid":"U1","typeName":"securenotes.SecureNote","title":"A","secureContents":{}}"#,
+        "\n",
+        r#"{"uuid":"U2","typeName":"securenotes.SecureNote","title":"B","secureContents":{}}"#,
+        "\n",
+        r#"{"uuid":"U3","typeName":"securenotes.SecureNote","title":"C","secureContents":{}}"#,
+        "\n",
+    );
 
     #[test]
     fn новая_запись_создаётся_и_сохраняется() {
