@@ -1,0 +1,24 @@
+[package]
+name = "opclient-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Интерфейс клиента экспорта 1Password (iced)"
+
+[dependencies]
+opclient-core.workspace = true
+iced = { version = "0.14", default-features = false, features = ["smol", "wgpu", "tiny-skia", "crisp", "web-colors", "image", "svg"] }
+iced_wgpu = "0.14"
+iced_winit = "0.14"
+iced_futures = "0.14"
+rfd = { version = "0.15", default-features = false }
+async-channel = "2"
+muda = "0.19.3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+arboard = "3"
+
+[[bin]]
+name = "opclient-ui"
+path = "src/main.rs"

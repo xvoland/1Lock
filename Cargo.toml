@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/cli", "crates/ui"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.83"
+license = "MIT"
+
+[workspace.dependencies]
+opclient-core = { path = "crates/core" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
