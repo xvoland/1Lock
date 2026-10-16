@@ -5,7 +5,12 @@ members = ["crates/core", "crates/cli", "crates/ui"]
 [workspace.package]
 version = "1.0.0"
 edition = "2021"
-rust-version = "1.83"
+# Not 1.83, as it was until someone tried to build from a clone on exactly
+# that toolchain: 35 dependencies, iced among them, are edition 2024, which
+# cargo learned in 1.85. Declaring a floor the build cannot meet is worse
+# than no floor at all — the error arrives from inside a dependency and says
+# nothing about which version is needed.
+rust-version = "1.85"
 license = "MIT"
 
 [workspace.dependencies]
