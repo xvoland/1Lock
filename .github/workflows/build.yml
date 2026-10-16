@@ -186,6 +186,12 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # gh infers the repository from the git remote, and this job has no
+          # checkout: it only downloads artifacts. Without this it stops at
+          # "failed to run git: not a git repository" and never reaches the
+          # release at all. GH_REPO is read by every gh call, so the rest of
+          # the script stays free of --repo.
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
